@@ -136,23 +136,26 @@ def _detect_mix_in(y, sr, rms, onset_env, hop,
 
 
 def _detect_first_vocal(y, sr, hop, **_):
-    """First sustained vocal region using harmonic separation + spectral centroid."""
-    y_harmonic, _ = librosa.effects.hpss(y)
+    """First sustained vocal region using spectral centroid + flatness."""
     centroid = librosa.feature.spectral_centroid(
-        y=y_harmonic, sr=sr, hop_length=hop
+        y=y, sr=sr, hop_length=hop
     )[0]
-    rms_harm = librosa.feature.rms(y=y_harmonic, hop_length=hop)[0]
+    flatness = librosa.feature.spectral_flatness(y=y, hop_length=hop)[0]
+    rms = librosa.feature.rms(y=y, hop_length=hop)[0]
 
     vocal_low = 300.0
     vocal_high = 3000.0
     in_vocal_range = (centroid >= vocal_low) & (centroid <= vocal_high)
 
-    median_energy = np.median(rms_harm)
+    # Vocals are tonal (low flatness) with energy
+    is_tonal = flatness < np.percentile(flatness, 40)
+
+    median_energy = np.median(rms)
     if median_energy < 1e-10:
         return None, 0.0
-    has_energy = rms_harm > median_energy * 1.5
+    has_energy = rms > median_energy * 1.5
 
-    vocal_frames = in_vocal_range & has_energy
+    vocal_frames = in_vocal_range & is_tonal & has_energy
 
     min_frames = int(1.0 * sr / hop)
     count = 0
