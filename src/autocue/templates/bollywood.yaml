@@ -8,27 +8,27 @@ cues:
     color: yellow
   2:
     detect: first_vocal
-    label: "Verse 1"
+    label: "Vocal"
     color: orange
   3:
-    detect: first_drop
-    label: "Chorus"
+    detect: first_chorus
+    label: "Chorus 1"
     color: purple
   4:
-    detect: breakdown
-    label: "Interlude"
+    detect: second_chorus
+    label: "Chorus 2"
     color: red
   5:
-    detect: second_drop
-    label: "Chorus 2"
+    detect: third_chorus
+    label: "Chorus 3"
     color: green
-  8:
+    optional: true
+  6:
     detect: outro_start
     label: "Outro"
-    color: blue
+    color: teal
 
 analysis:
   intro_energy_percentile: 20
   drop_energy_ratio: 1.3
-  breakdown_min_duration_seconds: 6.0
-  outro_energy_percentile: 20
+  min_section_seconds: 4.0

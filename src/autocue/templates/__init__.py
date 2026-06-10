@@ -7,8 +7,9 @@ import yaml
 
 
 VALID_DETECT_KEYS = {
-    "mix_in", "first_vocal", "first_drop",
-    "breakdown", "second_drop", "outro_start",
+    "mix_in", "first_vocal",
+    "first_chorus", "second_chorus", "third_chorus",
+    "outro_start",
 }
 
 VALID_COLORS = {

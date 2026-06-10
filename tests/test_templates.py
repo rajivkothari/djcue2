@@ -37,7 +37,7 @@ class TestValidateTemplate:
             "name": "Test",
             "cues": {
                 1: {"detect": "mix_in", "label": "Mix In", "color": "yellow"},
-                3: {"detect": "first_drop", "label": "Drop", "color": "purple"},
+                3: {"detect": "first_chorus", "label": "Chorus", "color": "purple"},
             },
         }
         errors = validate_template(template)

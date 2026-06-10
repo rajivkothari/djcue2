@@ -4,7 +4,7 @@ description: Western electronic dance music (house, techno, trance)
 cues:
   1:
     detect: mix_in
-    label: "Mix In"
+    label: "Intro"
     color: yellow
   2:
     detect: first_vocal
@@ -12,24 +12,24 @@ cues:
     color: orange
     optional: true
   3:
-    detect: first_drop
+    detect: first_chorus
     label: "Drop 1"
     color: purple
   4:
-    detect: breakdown
-    label: "Breakdown"
+    detect: second_chorus
+    label: "Drop 2"
     color: red
   5:
-    detect: second_drop
-    label: "Drop 2"
+    detect: third_chorus
+    label: "Drop 3"
     color: green
-  8:
+    optional: true
+  6:
     detect: outro_start
     label: "Outro"
-    color: blue
+    color: teal
 
 analysis:
   intro_energy_percentile: 25
   drop_energy_ratio: 1.5
-  breakdown_min_duration_seconds: 4.0
-  outro_energy_percentile: 25
+  min_section_seconds: 4.0

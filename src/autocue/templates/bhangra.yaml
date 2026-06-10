@@ -11,24 +11,24 @@ cues:
     label: "Verse"
     color: orange
   3:
-    detect: first_drop
-    label: "Hook"
+    detect: first_chorus
+    label: "Hook 1"
     color: purple
   4:
-    detect: breakdown
-    label: "Dhol Break"
+    detect: second_chorus
+    label: "Hook 2"
     color: red
   5:
-    detect: second_drop
-    label: "Hook 2"
+    detect: third_chorus
+    label: "Hook 3"
     color: green
-  8:
+    optional: true
+  6:
     detect: outro_start
     label: "Outro"
-    color: blue
+    color: teal
 
 analysis:
   intro_energy_percentile: 20
   drop_energy_ratio: 1.2
-  breakdown_min_duration_seconds: 3.0
-  outro_energy_percentile: 20
+  min_section_seconds: 3.0
