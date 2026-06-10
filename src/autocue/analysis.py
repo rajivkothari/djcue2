@@ -196,15 +196,15 @@ def _find_chorus_sections(sections, centroids, drop_energy_ratio=1.5, **_):
 
     Strategy:
       1. Find the first high-energy section with an energy jump (first chorus)
-      2. Find later sections with similar features (chorus repetitions)
+      2. Find later sections with similar features, spaced across the track
     """
     if len(sections) < 3 or len(centroids) < 3:
         return []
 
     track_duration = sections[-1]["end_seconds"]
+    min_chorus_spacing = max(20.0, track_duration / 8)
 
-    # Find first chorus: biggest energy jump in first 50% of track,
-    # among sections with above-median energy
+    # Find first chorus: biggest energy jump in first 50% of track
     first_chorus_idx = None
     best_jump = 0.0
 
@@ -224,21 +224,30 @@ def _find_chorus_sections(sections, centroids, drop_energy_ratio=1.5, **_):
     if first_chorus_idx is None:
         return []
 
-    # Find similar sections using feature centroids
     chorus_centroid = centroids[first_chorus_idx]
-    chorus_indices = [first_chorus_idx]
+    all_dists = np.linalg.norm(centroids - chorus_centroid, axis=1)
+    median_dist = np.median(all_dists[all_dists > 0]) if np.any(all_dists > 0) else 1.0
 
+    # Score every section by similarity to first chorus
+    candidates = []
     for i in range(first_chorus_idx + 1, len(sections)):
-        dist = np.linalg.norm(centroids[i] - chorus_centroid)
-        # Normalize by the average distance to get a relative measure
-        all_dists = np.linalg.norm(centroids - chorus_centroid, axis=1)
-        median_dist = np.median(all_dists[all_dists > 0]) if np.any(all_dists > 0) else 1.0
-
+        dist = all_dists[i]
         similarity = 1.0 - (dist / (median_dist * 2 + 1e-10))
+        if similarity > 0.2 and sections[i]["relative_energy"] > 0.3:
+            candidates.append((i, similarity))
 
-        if similarity > 0.3 and sections[i]["relative_energy"] > 0.3:
-            chorus_indices.append(i)
+    # Pick candidates spaced apart, preferring highest similarity
+    candidates.sort(key=lambda x: -x[1])
+    chorus_indices = [first_chorus_idx]
+    last_time = sections[first_chorus_idx]["start_seconds"]
 
+    for idx, sim in candidates:
+        t = sections[idx]["start_seconds"]
+        if all(abs(t - sections[ci]["start_seconds"]) >= min_chorus_spacing
+               for ci in chorus_indices):
+            chorus_indices.append(idx)
+
+    chorus_indices.sort(key=lambda i: sections[i]["start_seconds"])
     return chorus_indices
 
 
