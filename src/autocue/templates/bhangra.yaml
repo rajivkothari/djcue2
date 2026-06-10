@@ -1,0 +1,34 @@
+name: Bhangra
+description: Punjabi dance music — heavy dhol, call-and-response vocals
+
+cues:
+  1:
+    detect: mix_in
+    label: "Intro"
+    color: yellow
+  2:
+    detect: first_vocal
+    label: "Verse"
+    color: orange
+  3:
+    detect: first_drop
+    label: "Hook"
+    color: purple
+  4:
+    detect: breakdown
+    label: "Dhol Break"
+    color: red
+  5:
+    detect: second_drop
+    label: "Hook 2"
+    color: green
+  8:
+    detect: outro_start
+    label: "Outro"
+    color: blue
+
+analysis:
+  intro_energy_percentile: 20
+  drop_energy_ratio: 1.2
+  breakdown_min_duration_seconds: 3.0
+  outro_energy_percentile: 20

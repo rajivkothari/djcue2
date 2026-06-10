@@ -1,0 +1,34 @@
+name: Bollywood
+description: Hindi film songs — verse-chorus with instrumental interludes
+
+cues:
+  1:
+    detect: mix_in
+    label: "Intro"
+    color: yellow
+  2:
+    detect: first_vocal
+    label: "Verse 1"
+    color: orange
+  3:
+    detect: first_drop
+    label: "Chorus"
+    color: purple
+  4:
+    detect: breakdown
+    label: "Interlude"
+    color: red
+  5:
+    detect: second_drop
+    label: "Chorus 2"
+    color: green
+  8:
+    detect: outro_start
+    label: "Outro"
+    color: blue
+
+analysis:
+  intro_energy_percentile: 20
+  drop_energy_ratio: 1.3
+  breakdown_min_duration_seconds: 6.0
+  outro_energy_percentile: 20

@@ -7,12 +7,15 @@ name = "autocue"
 version = "0.1.0"
 description = "Auto-cue hot cue placement for Engine DJ libraries"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "pyyaml>=6.0",
+]
 
 [project.optional-dependencies]
 analysis = [
     "librosa>=0.10",
     "numpy>=1.24",
+    "scipy>=1.11",
     "pyyaml>=6.0",
 ]
 dev = [
@@ -25,6 +28,9 @@ autocue = "autocue.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"autocue.templates" = ["*.yaml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

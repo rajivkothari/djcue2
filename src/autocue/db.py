@@ -84,6 +84,7 @@ def list_tracks(conn: sqlite3.Connection, search: str | None = None,
                 t.id,
                 t.title,
                 t.artist,
+                t.path,
                 t.bpmAnalyzed as bpm,
                 pd.trackData,
                 pd.quickCues,
@@ -97,6 +98,7 @@ def list_tracks(conn: sqlite3.Connection, search: str | None = None,
                 t.id,
                 t.title,
                 t.artist,
+                t.path,
                 t.bpmAnalyzed as bpm,
                 t.trackData,
                 t.quickCues,
@@ -125,12 +127,30 @@ def list_tracks(conn: sqlite3.Connection, search: str | None = None,
             "id": row["id"],
             "title": row["title"] or "(untitled)",
             "artist": row["artist"] or "(unknown)",
+            "path": row["path"],
             "bpm": row["bpm"],
             "track_data_blob": row["trackData"],
             "quick_cues_blob": row["quickCues"],
             "beat_data_blob": row["beatData"],
         })
     return result
+
+
+def resolve_audio_path(db_path: str, track_path: str) -> Path:
+    """Resolve a track's path to an absolute filesystem path.
+
+    Engine DJ stores paths relative to the library root, or as absolute paths.
+    The library root is the parent of the Database2/ directory containing m.db.
+    """
+    track = Path(track_path)
+    if track.is_absolute() and track.exists():
+        return track
+
+    library_root = Path(db_path).resolve().parent.parent
+    resolved = library_root / track_path
+    if not resolved.exists():
+        raise FileNotFoundError(f"Audio file not found: {resolved}")
+    return resolved
 
 
 def is_engine_dj_running() -> bool:

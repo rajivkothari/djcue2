@@ -1,0 +1,35 @@
+name: EDM
+description: Western electronic dance music (house, techno, trance)
+
+cues:
+  1:
+    detect: mix_in
+    label: "Mix In"
+    color: yellow
+  2:
+    detect: first_vocal
+    label: "Vocal"
+    color: orange
+    optional: true
+  3:
+    detect: first_drop
+    label: "Drop 1"
+    color: purple
+  4:
+    detect: breakdown
+    label: "Breakdown"
+    color: red
+  5:
+    detect: second_drop
+    label: "Drop 2"
+    color: green
+  8:
+    detect: outro_start
+    label: "Outro"
+    color: blue
+
+analysis:
+  intro_energy_percentile: 25
+  drop_energy_ratio: 1.5
+  breakdown_min_duration_seconds: 4.0
+  outro_energy_percentile: 25

@@ -4,6 +4,7 @@ import sys
 from autocue.db import (
     open_library, list_tracks, check_schema,
     is_engine_dj_running, backup_library, write_quick_cues,
+    resolve_audio_path,
 )
 from autocue.codec import (
     decode_quick_cues, encode_quick_cues,
@@ -245,6 +246,183 @@ def cmd_set(args):
     print("Cue written. Open Engine DJ and verify.")
 
 
+def cmd_analyze(args):
+    try:
+        from autocue.analysis import analyze_structure
+    except ImportError as e:
+        print(f"ERROR: {e}")
+        sys.exit(1)
+    from autocue.templates import load_template
+
+    db = open_library(args.db, readonly=True)
+    try:
+        version = check_schema(db)
+    except RuntimeError as e:
+        print(f"ERROR: {e}")
+        sys.exit(1)
+
+    tracks = list_tracks(db, search=args.track)
+    db.close()
+
+    if not tracks:
+        print(f"No tracks matching '{args.track}'")
+        sys.exit(1)
+    if len(tracks) > 1:
+        print(f"Multiple tracks match '{args.track}'. Use track ID instead:")
+        for t in tracks:
+            print(f"  ID {t['id']}: {t['title']} — {t['artist']}")
+        sys.exit(1)
+
+    track = tracks[0]
+    print(f"Track: {track['title']}")
+    print(f"Artist: {track['artist']}")
+    print(f"ID: {track['id']}")
+
+    try:
+        template = load_template(args.template, user_dir=args.template_dir)
+    except (FileNotFoundError, ValueError) as e:
+        print(f"ERROR: {e}")
+        sys.exit(1)
+
+    print(f"Template: {template.get('name', args.template)}")
+
+    if not track["path"]:
+        print("ERROR: Track has no file path in database.")
+        sys.exit(1)
+
+    try:
+        audio_path = resolve_audio_path(args.db, track["path"])
+    except FileNotFoundError as e:
+        print(f"ERROR: {e}")
+        sys.exit(1)
+
+    print(f"Audio: {audio_path}")
+    print("Analyzing...")
+
+    analysis_params = template.get("analysis", {})
+    result = analyze_structure(str(audio_path), **analysis_params)
+
+    analysis_sr = result["sample_rate"]
+    sample_rate = _get_sample_rate(track)
+
+    sr_scale = sample_rate / analysis_sr if analysis_sr != sample_rate else 1.0
+
+    downbeats = []
+    if track["beat_data_blob"]:
+        beat_data = decode_beat_data(track["beat_data_blob"])
+        downbeats = get_downbeat_positions(beat_data)
+
+    if track["quick_cues_blob"] is None:
+        print("ERROR: Track has no quickCues blob. "
+              "Analyze it in Engine DJ first.")
+        sys.exit(1)
+
+    cue_data = decode_quick_cues(track["quick_cues_blob"])
+    template_cues = template["cues"]
+
+    proposed = []
+    skipped_existing = []
+
+    print(f"\n{'Cue':<6} {'Time':<10} {'Label':<14} {'Color':<8} {'Confidence':<12} {'Note'}")
+    print("-" * 70)
+
+    for slot_key, cue_def in sorted(template_cues.items(), key=lambda x: int(x[0])):
+        slot = int(slot_key)
+        cue_index = slot - 1
+        detect_key = cue_def["detect"]
+        label = cue_def.get("label", "")
+        color_name = cue_def.get("color", DEFAULT_CUE_COLORS.get(slot, "yellow"))
+        is_optional = cue_def.get("optional", False)
+
+        raw_pos = result["positions"].get(detect_key)
+        confidence = result["confidences"].get(detect_key, 0.0)
+
+        if raw_pos is None:
+            note = "(optional — skipped)" if is_optional else "NOT DETECTED"
+            print(f"  {slot:<4} {'—':<10} {label:<14} {color_name:<8} "
+                  f"{'—':<12} {note}")
+            continue
+
+        position_samples = raw_pos * sr_scale
+
+        if downbeats:
+            position_samples = snap_to_downbeat(position_samples, downbeats)
+
+        existing = cue_data["cues"][cue_index]
+        note = ""
+        if is_cue_active(existing):
+            if not args.overwrite:
+                old_time = _format_time(
+                    existing["position_samples"] / sample_rate
+                )
+                note = f"EXISTS at {old_time} (use --overwrite)"
+                skipped_existing.append(slot)
+                print(f"  {slot:<4} "
+                      f"{_format_time(position_samples / sample_rate):<10} "
+                      f"{label:<14} {color_name:<8} "
+                      f"{confidence:<12.0%} {note}")
+                continue
+            else:
+                note = "(overwriting)"
+
+        if confidence < 0.4:
+            note += " LOW CONFIDENCE"
+
+        time_str = _format_time(position_samples / sample_rate)
+        print(f"  {slot:<4} {time_str:<10} {label:<14} {color_name:<8} "
+              f"{confidence:<12.0%} {note}")
+
+        color_a, color_r, color_g, color_b = ENGINE_COLORS[color_name.lower()]
+        proposed.append({
+            "slot": slot,
+            "index": cue_index,
+            "label": label,
+            "position_samples": position_samples,
+            "color_a": color_a,
+            "color_r": color_r,
+            "color_g": color_g,
+            "color_b": color_b,
+            "confidence": confidence,
+        })
+
+    if not proposed:
+        print("\nNo cues to write.")
+        return
+
+    if args.dry_run:
+        print(f"\n(dry run — {len(proposed)} cues proposed, not written)")
+        return
+
+    if is_engine_dj_running():
+        print("\nERROR: Engine DJ is running. Close it before writing cues.")
+        sys.exit(1)
+
+    backup_path = backup_library(args.db)
+    print(f"\nBackup: {backup_path}")
+
+    for p in proposed:
+        cue_data["cues"][p["index"]] = {
+            "index": p["index"],
+            "label": p["label"],
+            "position_samples": p["position_samples"],
+            "color_a": p["color_a"],
+            "color_r": p["color_r"],
+            "color_g": p["color_g"],
+            "color_b": p["color_b"],
+        }
+
+    new_blob = encode_quick_cues(cue_data)
+
+    db = open_library(args.db, readonly=False)
+    write_quick_cues(db, track["id"], new_blob)
+    db.close()
+
+    print(f"Wrote {len(proposed)} cues. Open Engine DJ and verify.")
+    if skipped_existing:
+        print(f"Skipped slots with existing cues: "
+              f"{', '.join(str(s) for s in skipped_existing)}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="autocue",
@@ -283,6 +461,22 @@ def main():
     p_set.add_argument("--dry-run", action="store_true",
                        help="Show what would be written without writing")
     p_set.set_defaults(func=cmd_set)
+
+    p_analyze = sub.add_parser("analyze",
+                               help="Auto-detect and place cues on a track")
+    p_analyze.add_argument("track",
+                           help="Track title or ID (must match exactly one)")
+    p_analyze.add_argument(
+        "--template", default="edm",
+        help="Cue template name or path to .yaml file (default: edm)",
+    )
+    p_analyze.add_argument("--template-dir", default=None,
+                           help="Directory for user template overrides")
+    p_analyze.add_argument("--dry-run", action="store_true",
+                           help="Show proposed cues without writing")
+    p_analyze.add_argument("--overwrite", action="store_true",
+                           help="Overwrite existing cues in matched slots")
+    p_analyze.set_defaults(func=cmd_analyze)
 
     args = parser.parse_args()
     args.db = str(__import__("pathlib").Path(args.db).expanduser())
