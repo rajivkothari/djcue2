@@ -1,19 +1,20 @@
 """Engine DJ SQLite database access layer.
 
-Supports schema v2 (2.18.0 – 2.21.x) where blobs live in the Track table.
-Schema v3 (3.0.0+) moves blobs to a PerformanceData table and is not yet supported.
+Supports schema v2 (2.18.0 – 2.21.x) where blobs live in the Track table,
+and schema v3 (3.0.0+) where blobs live in the PerformanceData table.
 """
 
 import sqlite3
 from pathlib import Path
 
 
-SUPPORTED_SCHEMA_MAJOR = 2
+SUPPORTED_SCHEMA_MAJORS = {2, 3}
 
 TESTED_SCHEMA_VERSIONS = {
     "2.18.0",
     "2.20.1", "2.20.2", "2.20.3",
     "2.21.0", "2.21.1", "2.21.2",
+    "3.0.0", "3.0.1", "3.0.2",
 }
 
 
@@ -49,16 +50,17 @@ def check_schema(conn: sqlite3.Connection) -> str:
     major, minor, patch = get_schema_version(conn)
     version_str = f"{major}.{minor}.{patch}"
 
-    if major < SUPPORTED_SCHEMA_MAJOR:
+    if major not in SUPPORTED_SCHEMA_MAJORS:
+        if major < min(SUPPORTED_SCHEMA_MAJORS):
+            raise RuntimeError(
+                f"Schema {version_str} is v1 format (separate p.db). "
+                f"Only v2+ schemas are supported."
+            )
         raise RuntimeError(
-            f"Schema {version_str} is v1 format (separate p.db). "
-            f"Only v2 schemas (2.18.0+) are supported."
+            f"Schema {version_str} is not supported. "
+            f"Supported major versions: {sorted(SUPPORTED_SCHEMA_MAJORS)}"
         )
-    if major > SUPPORTED_SCHEMA_MAJOR:
-        raise RuntimeError(
-            f"Schema {version_str} is v3+ format (blobs in PerformanceData table). "
-            f"Only v2 schemas (2.18.0 – 2.21.x) are currently supported."
-        )
+
     if version_str not in TESTED_SCHEMA_VERSIONS:
         raise RuntimeError(
             f"Schema {version_str} has not been tested. "
@@ -70,17 +72,34 @@ def check_schema(conn: sqlite3.Connection) -> str:
 
 def list_tracks(conn: sqlite3.Connection, search: str | None = None,
                 limit: int | None = None) -> list[dict]:
-    query = """
-        SELECT
-            t.id,
-            t.title,
-            t.artist,
-            t.bpmAnalyzed as bpm,
-            t.trackData,
-            t.quickCues,
-            t.beatData
-        FROM Track t
-    """
+    major, _, _ = get_schema_version(conn)
+
+    if major >= 3:
+        query = """
+            SELECT
+                t.id,
+                t.title,
+                t.artist,
+                t.bpmAnalyzed as bpm,
+                pd.trackData,
+                pd.quickCues,
+                pd.beatData
+            FROM Track t
+            LEFT JOIN PerformanceData pd ON pd.trackId = t.id
+        """
+    else:
+        query = """
+            SELECT
+                t.id,
+                t.title,
+                t.artist,
+                t.bpmAnalyzed as bpm,
+                t.trackData,
+                t.quickCues,
+                t.beatData
+            FROM Track t
+        """
+
     params: list = []
 
     if search is not None:
