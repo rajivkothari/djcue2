@@ -96,8 +96,9 @@ def _analyze(y, sr, **params):
 def _affinity_matrix(features):
     """Self-similarity via cosine distance + Gaussian kernel."""
     dist = cdist(features.T, features.T, metric='cosine')
-    bandwidth = np.median(dist[dist > 0]) if np.any(dist > 0) else 1.0
-    return np.exp(-dist / bandwidth)
+    # Use 25th percentile for tighter bandwidth — more discriminative
+    bandwidth = np.percentile(dist[dist > 0], 25) if np.any(dist > 0) else 1.0
+    return np.exp(-dist / max(bandwidth, 1e-10))
 
 
 def _find_structural_boundaries(features, y, sr, hop,
@@ -108,7 +109,7 @@ def _find_structural_boundaries(features, y, sr, hop,
     novelty = _checkerboard_novelty(rec, kernel_size)
 
     min_distance = max(1, int(min_section_seconds * sr / hop))
-    threshold = (np.percentile(novelty[novelty > 0], 60)
+    threshold = (np.percentile(novelty[novelty > 0], 40)
                  if np.any(novelty > 0) else 0)
 
     peaks, _ = find_peaks(novelty, distance=min_distance, height=threshold)
@@ -202,7 +203,7 @@ def _find_chorus_sections(sections, centroids, drop_energy_ratio=1.5, **_):
         return []
 
     track_duration = sections[-1]["end_seconds"]
-    min_chorus_spacing = max(20.0, track_duration / 8)
+    min_chorus_spacing = max(30.0, track_duration / 5)
 
     # Find first chorus: biggest energy jump in first 50% of track
     first_chorus_idx = None
