@@ -13,6 +13,7 @@ try:
     import librosa
     import numpy as np
     from scipy.signal import find_peaks
+    from scipy.spatial.distance import cdist
 except ImportError:
     raise ImportError(
         "Analysis requires extra dependencies. "
@@ -81,6 +82,18 @@ def _analyze(y, sr, **params):
 # Structural boundary detection
 # ---------------------------------------------------------------------------
 
+def _affinity_matrix(features):
+    """Compute a self-similarity affinity matrix using cosine distance.
+
+    Replaces librosa.segment.recurrence_matrix to avoid the sklearn import.
+    """
+    # features shape: (n_features, n_frames) — cdist wants (n_frames, n_features)
+    dist = cdist(features.T, features.T, metric='cosine')
+    bandwidth = np.median(dist[dist > 0]) if np.any(dist > 0) else 1.0
+    affinity = np.exp(-dist / bandwidth)
+    return affinity
+
+
 def _find_structural_boundaries(y, sr,
                                 min_section_seconds=4.0, **_):
     """Find section boundaries using chroma/MFCC self-similarity novelty."""
@@ -94,9 +107,7 @@ def _find_structural_boundaries(y, sr,
         librosa.util.normalize(mfcc, axis=1),
     ])
 
-    rec = librosa.segment.recurrence_matrix(
-        features, mode='affinity', sym=True,
-    )
+    rec = _affinity_matrix(features)
 
     kernel_size = min(64, max(8, rec.shape[0] // 8))
     novelty = _checkerboard_novelty(rec, kernel_size)
