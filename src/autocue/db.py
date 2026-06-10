@@ -4,7 +4,11 @@ Supports schema v2 (2.18.0 – 2.21.x) where blobs live in the Track table,
 and schema v3 (3.0.0+) where blobs live in the PerformanceData table.
 """
 
+import shutil
 import sqlite3
+import subprocess
+import sys
+from datetime import datetime
 from pathlib import Path
 
 
@@ -127,3 +131,54 @@ def list_tracks(conn: sqlite3.Connection, search: str | None = None,
             "beat_data_blob": row["beatData"],
         })
     return result
+
+
+def is_engine_dj_running() -> bool:
+    """Check if Engine DJ is running. Works on Windows and macOS."""
+    try:
+        if sys.platform == "win32":
+            result = subprocess.run(
+                ["tasklist", "/FI", "IMAGENAME eq Engine DJ.exe", "/NH"],
+                capture_output=True, text=True, timeout=5,
+            )
+            return "Engine DJ.exe" in result.stdout
+        elif sys.platform == "darwin":
+            result = subprocess.run(
+                ["pgrep", "-f", "Engine DJ"],
+                capture_output=True, text=True, timeout=5,
+            )
+            return result.returncode == 0
+        else:
+            result = subprocess.run(
+                ["pgrep", "-f", "[Ee]ngine.*[Dd][Jj]"],
+                capture_output=True, text=True, timeout=5,
+            )
+            return result.returncode == 0
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return False
+
+
+def backup_library(db_path: str) -> Path:
+    """Create a timestamped backup of m.db. Returns backup path."""
+    src = Path(db_path)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup = src.parent / f"m_backup_{timestamp}.db"
+    shutil.copy2(src, backup)
+    return backup
+
+
+def write_quick_cues(conn: sqlite3.Connection, track_id: int,
+                     blob: bytes) -> None:
+    """Write a quickCues blob for a track."""
+    major, _, _ = get_schema_version(conn)
+    if major >= 3:
+        conn.execute(
+            "UPDATE PerformanceData SET quickCues = ? WHERE trackId = ?",
+            (blob, track_id),
+        )
+    else:
+        conn.execute(
+            "UPDATE Track SET quickCues = ? WHERE id = ?",
+            (blob, track_id),
+        )
+    conn.commit()
