@@ -123,16 +123,7 @@ def list_tracks(conn: sqlite3.Connection, search: str | None = None,
     rows = conn.execute(query, params).fetchall()
     result = []
     for row in rows:
-        result.append({
-            "id": row["id"],
-            "title": row["title"] or "(untitled)",
-            "artist": row["artist"] or "(unknown)",
-            "path": row["path"],
-            "bpm": row["bpm"],
-            "track_data_blob": row["trackData"],
-            "quick_cues_blob": row["quickCues"],
-            "beat_data_blob": row["beatData"],
-        })
+        result.append(_track_row_to_dict(row))
     return result
 
 
@@ -202,3 +193,106 @@ def write_quick_cues(conn: sqlite3.Connection, track_id: int,
             (blob, track_id),
         )
     conn.commit()
+
+
+def list_playlists(conn: sqlite3.Connection) -> list[dict]:
+    """List all playlists with track counts."""
+    rows = conn.execute("""
+        SELECT p.id, p.title, COUNT(pe.trackId) as track_count
+        FROM Playlist p
+        LEFT JOIN PlaylistEntity pe ON pe.listId = p.id
+        GROUP BY p.id, p.title
+        ORDER BY p.title
+    """).fetchall()
+    return [{"id": r[0], "title": r[1], "track_count": r[2]} for r in rows]
+
+
+def list_crates(conn: sqlite3.Connection) -> list[dict]:
+    """List all crates with track counts."""
+    rows = conn.execute("""
+        SELECT c.id, c.title, COUNT(ct.trackId) as track_count
+        FROM Crate c
+        LEFT JOIN CrateTrackList ct ON ct.crateId = c.id
+        GROUP BY c.id, c.title
+        ORDER BY c.title
+    """).fetchall()
+    return [{"id": r[0], "title": r[1], "track_count": r[2]} for r in rows]
+
+
+def get_playlist_tracks(conn: sqlite3.Connection,
+                        playlist_name: str) -> list[dict]:
+    """Get all tracks in a playlist by name."""
+    major, _, _ = get_schema_version(conn)
+
+    if major >= 3:
+        query = """
+            SELECT
+                t.id, t.title, t.artist, t.path,
+                t.bpmAnalyzed as bpm,
+                pd.trackData, pd.quickCues, pd.beatData
+            FROM Track t
+            JOIN PlaylistEntity pe ON pe.trackId = t.id
+            JOIN Playlist p ON p.id = pe.listId
+            LEFT JOIN PerformanceData pd ON pd.trackId = t.id
+            WHERE p.title = ?
+        """
+    else:
+        query = """
+            SELECT
+                t.id, t.title, t.artist, t.path,
+                t.bpmAnalyzed as bpm,
+                t.trackData, t.quickCues, t.beatData
+            FROM Track t
+            JOIN PlaylistEntity pe ON pe.trackId = t.id
+            JOIN Playlist p ON p.id = pe.listId
+            WHERE p.title = ?
+        """
+
+    rows = conn.execute(query, (playlist_name,)).fetchall()
+    return [_track_row_to_dict(r) for r in rows]
+
+
+def get_crate_tracks(conn: sqlite3.Connection,
+                     crate_name: str) -> list[dict]:
+    """Get all tracks in a crate by name."""
+    major, _, _ = get_schema_version(conn)
+
+    if major >= 3:
+        query = """
+            SELECT
+                t.id, t.title, t.artist, t.path,
+                t.bpmAnalyzed as bpm,
+                pd.trackData, pd.quickCues, pd.beatData
+            FROM Track t
+            JOIN CrateTrackList ct ON ct.trackId = t.id
+            JOIN Crate c ON c.id = ct.crateId
+            LEFT JOIN PerformanceData pd ON pd.trackId = t.id
+            WHERE c.title = ?
+        """
+    else:
+        query = """
+            SELECT
+                t.id, t.title, t.artist, t.path,
+                t.bpmAnalyzed as bpm,
+                t.trackData, t.quickCues, t.beatData
+            FROM Track t
+            JOIN CrateTrackList ct ON ct.trackId = t.id
+            JOIN Crate c ON c.id = ct.crateId
+            WHERE c.title = ?
+        """
+
+    rows = conn.execute(query, (crate_name,)).fetchall()
+    return [_track_row_to_dict(r) for r in rows]
+
+
+def _track_row_to_dict(row) -> dict:
+    return {
+        "id": row["id"],
+        "title": row["title"] or "(untitled)",
+        "artist": row["artist"] or "(unknown)",
+        "path": row["path"],
+        "bpm": row["bpm"],
+        "track_data_blob": row["trackData"],
+        "quick_cues_blob": row["quickCues"],
+        "beat_data_blob": row["beatData"],
+    }

@@ -5,6 +5,7 @@ from autocue.db import (
     open_library, list_tracks, check_schema,
     is_engine_dj_running, backup_library, write_quick_cues,
     resolve_audio_path,
+    list_playlists, list_crates, get_playlist_tracks, get_crate_tracks,
 )
 from autocue.codec import (
     decode_quick_cues, encode_quick_cues,
@@ -423,6 +424,230 @@ def cmd_analyze(args):
               f"{', '.join(str(s) for s in skipped_existing)}")
 
 
+def cmd_list_playlists(args):
+    db = open_library(args.db, readonly=True)
+    try:
+        check_schema(db)
+    except RuntimeError as e:
+        print(f"ERROR: {e}")
+        sys.exit(1)
+
+    playlists = list_playlists(db)
+    db.close()
+
+    if not playlists:
+        print("No playlists found.")
+        return
+
+    print(f"{'ID':<6} {'Tracks':<8} {'Title'}")
+    print("-" * 50)
+    for p in playlists:
+        print(f"{p['id']:<6} {p['track_count']:<8} {p['title']}")
+
+
+def cmd_list_crates(args):
+    db = open_library(args.db, readonly=True)
+    try:
+        check_schema(db)
+    except RuntimeError as e:
+        print(f"ERROR: {e}")
+        sys.exit(1)
+
+    crates = list_crates(db)
+    db.close()
+
+    if not crates:
+        print("No crates found.")
+        return
+
+    print(f"{'ID':<6} {'Tracks':<8} {'Title'}")
+    print("-" * 50)
+    for c in crates:
+        print(f"{c['id']:<6} {c['track_count']:<8} {c['title']}")
+
+
+def cmd_batch(args):
+    try:
+        from autocue.analysis import analyze_structure
+    except ImportError as e:
+        print(f"ERROR: {e}")
+        sys.exit(1)
+    from autocue.templates import load_template
+
+    db = open_library(args.db, readonly=True)
+    try:
+        check_schema(db)
+    except RuntimeError as e:
+        print(f"ERROR: {e}")
+        sys.exit(1)
+
+    if args.playlist:
+        tracks = get_playlist_tracks(db, args.playlist)
+        source = f"playlist '{args.playlist}'"
+    elif args.crate:
+        tracks = get_crate_tracks(db, args.crate)
+        source = f"crate '{args.crate}'"
+    else:
+        print("ERROR: specify --playlist or --crate")
+        sys.exit(1)
+    db.close()
+
+    if not tracks:
+        print(f"No tracks found in {source}.")
+        sys.exit(1)
+
+    try:
+        template = load_template(args.template, user_dir=args.template_dir)
+    except (FileNotFoundError, ValueError) as e:
+        print(f"ERROR: {e}")
+        sys.exit(1)
+
+    print(f"Source: {source} ({len(tracks)} tracks)")
+    print(f"Template: {template.get('name', args.template)}")
+
+    if not args.dry_run and is_engine_dj_running():
+        print("ERROR: Engine DJ is running. Close it before writing cues.")
+        sys.exit(1)
+
+    backup_path = None
+    if not args.dry_run:
+        backup_path = backup_library(args.db)
+        print(f"Backup: {backup_path}")
+
+    analysis_params = template.get("analysis", {})
+    template_cues = template["cues"]
+
+    stats = {"processed": 0, "cues_written": 0, "skipped": 0,
+             "errors": 0, "low_confidence": []}
+
+    for i, track in enumerate(tracks):
+        prefix = f"[{i+1}/{len(tracks)}]"
+
+        existing_cues_blob = track["quick_cues_blob"]
+        if existing_cues_blob:
+            cue_data = decode_quick_cues(existing_cues_blob)
+            active = [c for c in cue_data["cues"] if is_cue_active(c)]
+            if active and not args.overwrite:
+                print(f"{prefix} SKIP {track['title']} — "
+                      f"{len(active)} existing cues (use --overwrite)")
+                stats["skipped"] += 1
+                continue
+
+        if not track["path"]:
+            print(f"{prefix} ERROR {track['title']} — no file path")
+            stats["errors"] += 1
+            continue
+
+        try:
+            audio_path = resolve_audio_path(args.db, track["path"])
+        except FileNotFoundError:
+            print(f"{prefix} ERROR {track['title']} — audio file not found")
+            stats["errors"] += 1
+            continue
+
+        print(f"{prefix} Analyzing {track['title']}...", end="", flush=True)
+
+        try:
+            result = analyze_structure(str(audio_path), **analysis_params)
+        except Exception as e:
+            print(f" ERROR: {e}")
+            stats["errors"] += 1
+            continue
+
+        analysis_sr = result["sample_rate"]
+        sample_rate = _get_sample_rate(track)
+        sr_scale = sample_rate / analysis_sr if analysis_sr != sample_rate else 1.0
+
+        downbeats = []
+        if track["beat_data_blob"]:
+            beat_data = decode_beat_data(track["beat_data_blob"])
+            downbeats = get_downbeat_positions(beat_data)
+
+        if existing_cues_blob is None:
+            print(f" ERROR: no quickCues blob")
+            stats["errors"] += 1
+            continue
+
+        cue_data = decode_quick_cues(existing_cues_blob)
+        proposed = []
+        track_low_conf = False
+
+        for slot_key, cue_def in sorted(template_cues.items(),
+                                        key=lambda x: int(x[0])):
+            slot = int(slot_key)
+            cue_index = slot - 1
+            detect_key = cue_def["detect"]
+            label = cue_def.get("label", "")
+            color_name = cue_def.get("color",
+                                     DEFAULT_CUE_COLORS.get(slot, "yellow"))
+            is_optional = cue_def.get("optional", False)
+
+            raw_pos = result["positions"].get(detect_key)
+            confidence = result["confidences"].get(detect_key, 0.0)
+
+            if raw_pos is None:
+                continue
+
+            position_samples = raw_pos * sr_scale
+            if downbeats:
+                position_samples = snap_to_downbeat(position_samples, downbeats)
+
+            existing = cue_data["cues"][cue_index]
+            if is_cue_active(existing) and not args.overwrite:
+                continue
+
+            if confidence < 0.4:
+                track_low_conf = True
+
+            color_a, color_r, color_g, color_b = ENGINE_COLORS[
+                color_name.lower()
+            ]
+            proposed.append({
+                "index": cue_index,
+                "label": label,
+                "position_samples": position_samples,
+                "color_a": color_a,
+                "color_r": color_r,
+                "color_g": color_g,
+                "color_b": color_b,
+            })
+
+        if not proposed:
+            print(" no cues to set")
+            continue
+
+        if track_low_conf:
+            stats["low_confidence"].append(track["title"])
+
+        if args.dry_run:
+            print(f" {len(proposed)} cues proposed")
+        else:
+            for p in proposed:
+                cue_data["cues"][p["index"]] = p
+
+            new_blob = encode_quick_cues(cue_data)
+            wdb = open_library(args.db, readonly=False)
+            write_quick_cues(wdb, track["id"], new_blob)
+            wdb.close()
+            print(f" {len(proposed)} cues written")
+            stats["cues_written"] += len(proposed)
+
+        stats["processed"] += 1
+
+    # Summary
+    print(f"\n{'='*50}")
+    print(f"Batch complete: {stats['processed']} processed, "
+          f"{stats['skipped']} skipped, {stats['errors']} errors")
+    if not args.dry_run:
+        print(f"Cues written: {stats['cues_written']}")
+        if backup_path:
+            print(f"Backup: {backup_path}")
+    if stats["low_confidence"]:
+        print(f"\nLow-confidence tracks (review manually):")
+        for t in stats["low_confidence"]:
+            print(f"  - {t}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="autocue",
@@ -477,6 +702,29 @@ def main():
     p_analyze.add_argument("--overwrite", action="store_true",
                            help="Overwrite existing cues in matched slots")
     p_analyze.set_defaults(func=cmd_analyze)
+
+    p_lp = sub.add_parser("list-playlists", help="List Engine DJ playlists")
+    p_lp.set_defaults(func=cmd_list_playlists)
+
+    p_lc = sub.add_parser("list-crates", help="List Engine DJ crates")
+    p_lc.set_defaults(func=cmd_list_crates)
+
+    p_batch = sub.add_parser("batch",
+                             help="Batch-process a playlist or crate")
+    group = p_batch.add_mutually_exclusive_group(required=True)
+    group.add_argument("--playlist", help="Playlist name to process")
+    group.add_argument("--crate", help="Crate name to process")
+    p_batch.add_argument(
+        "--template", default="edm",
+        help="Cue template name or path to .yaml file (default: edm)",
+    )
+    p_batch.add_argument("--template-dir", default=None,
+                         help="Directory for user template overrides")
+    p_batch.add_argument("--dry-run", action="store_true",
+                         help="Show proposed cues without writing")
+    p_batch.add_argument("--overwrite", action="store_true",
+                         help="Overwrite existing cues on tracks")
+    p_batch.set_defaults(func=cmd_batch)
 
     args = parser.parse_args()
     args.db = str(__import__("pathlib").Path(args.db).expanduser())
