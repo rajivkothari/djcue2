@@ -548,6 +548,11 @@ def cmd_batch(args):
     analysis_params = template.get("analysis", {})
     template_cues = template["cues"]
 
+    needs_analysis = any(
+        not cue_def["detect"].startswith("bar_")
+        for cue_def in template_cues.values()
+    )
+
     stats = {"processed": 0, "cues_written": 0, "skipped": 0,
              "errors": 0, "low_confidence": []}
 
@@ -589,30 +594,41 @@ def cmd_batch(args):
             stats["skipped"] += 1
             continue
 
-        try:
-            audio_path = resolve_audio_path(args.db, track["path"])
-        except FileNotFoundError:
-            print(f"{prefix} ERROR {track['title']} — audio file not found")
-            stats["errors"] += 1
-            continue
-
-        print(f"{prefix} Analyzing {track['title']}...", end="", flush=True)
-
-        try:
-            result = analyze_structure(str(audio_path), **analysis_params)
-        except Exception as e:
-            print(f" ERROR: {e}")
-            stats["errors"] += 1
-            continue
-
-        analysis_sr = result["sample_rate"]
-        sample_rate = _get_sample_rate(track)
-        sr_scale = sample_rate / analysis_sr if analysis_sr != sample_rate else 1.0
-
         downbeats = []
         if track["beat_data_blob"]:
             beat_data = decode_beat_data(track["beat_data_blob"])
             downbeats = get_downbeat_positions(beat_data)
+
+        if not downbeats:
+            print(f"{prefix} SKIP {track['title']} — no beat grid")
+            stats["skipped"] += 1
+            continue
+
+        sample_rate = _get_sample_rate(track)
+        result = None
+
+        if needs_analysis:
+            try:
+                audio_path = resolve_audio_path(args.db, track["path"])
+            except FileNotFoundError:
+                print(f"{prefix} ERROR {track['title']} — audio file not found")
+                stats["errors"] += 1
+                continue
+
+            print(f"{prefix} Analyzing {track['title']}...", end="", flush=True)
+
+            try:
+                result = analyze_structure(str(audio_path), **analysis_params)
+            except Exception as e:
+                print(f" ERROR: {e}")
+                stats["errors"] += 1
+                continue
+
+            analysis_sr = result["sample_rate"]
+            sr_scale = sample_rate / analysis_sr if analysis_sr != sample_rate else 1.0
+        else:
+            print(f"{prefix} {track['title']} ({len(downbeats)} bars)...",
+                  end="", flush=True)
 
         cue_data = decode_quick_cues(existing_cues_blob)
         proposed = []
@@ -632,8 +648,12 @@ def cmd_batch(args):
             if bar_result is not None:
                 position_samples, confidence = bar_result
                 if position_samples is None:
+                    print(f" [cue {slot}: {detect_key} out of range"
+                          f" ({len(downbeats)} bars)]", end="")
                     continue
             else:
+                if result is None:
+                    continue
                 raw_pos = result["positions"].get(detect_key)
                 confidence = result["confidences"].get(detect_key, 0.0)
 
