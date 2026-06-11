@@ -10,6 +10,7 @@ VALID_DETECT_KEYS = {
     "mix_in", "first_vocal",
     "first_chorus", "second_chorus", "third_chorus",
     "outro_start",
+    "bar_9",
 }
 
 VALID_COLORS = {

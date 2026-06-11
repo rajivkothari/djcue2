@@ -57,6 +57,17 @@ def _format_time(seconds: float) -> str:
     return f"{minutes}:{secs:05.2f}"
 
 
+def _resolve_bar_position(detect_key: str, downbeats: list[float]):
+    """Resolve beat-grid detect keys like 'bar_9' to a sample position."""
+    if not detect_key.startswith("bar_"):
+        return None
+    bar_num = int(detect_key.split("_")[1])
+    idx = bar_num - 1
+    if idx < len(downbeats):
+        return float(downbeats[idx]), 1.0
+    return None, 0.0
+
+
 def cmd_inspect(args):
     db = open_library(args.db, readonly=True)
     try:
@@ -335,19 +346,28 @@ def cmd_analyze(args):
         color_name = cue_def.get("color", DEFAULT_CUE_COLORS.get(slot, "yellow"))
         is_optional = cue_def.get("optional", False)
 
-        raw_pos = result["positions"].get(detect_key)
-        confidence = result["confidences"].get(detect_key, 0.0)
+        bar_result = _resolve_bar_position(detect_key, downbeats)
+        if bar_result is not None:
+            position_samples, confidence = bar_result
+            if position_samples is None:
+                note = "NO BEAT GRID"
+                print(f"  {slot:<4} {'—':<10} {label:<14} {color_name:<8} "
+                      f"{'—':<12} {note}")
+                continue
+        else:
+            raw_pos = result["positions"].get(detect_key)
+            confidence = result["confidences"].get(detect_key, 0.0)
 
-        if raw_pos is None:
-            note = "(optional — skipped)" if is_optional else "NOT DETECTED"
-            print(f"  {slot:<4} {'—':<10} {label:<14} {color_name:<8} "
-                  f"{'—':<12} {note}")
-            continue
+            if raw_pos is None:
+                note = "(optional — skipped)" if is_optional else "NOT DETECTED"
+                print(f"  {slot:<4} {'—':<10} {label:<14} {color_name:<8} "
+                      f"{'—':<12} {note}")
+                continue
 
-        position_samples = raw_pos * sr_scale
+            position_samples = raw_pos * sr_scale
 
-        if downbeats:
-            position_samples = snap_to_downbeat(position_samples, downbeats)
+            if downbeats:
+                position_samples = snap_to_downbeat(position_samples, downbeats)
 
         existing = cue_data["cues"][cue_index]
         note = ""
@@ -591,15 +611,22 @@ def cmd_batch(args):
                                      DEFAULT_CUE_COLORS.get(slot, "yellow"))
             is_optional = cue_def.get("optional", False)
 
-            raw_pos = result["positions"].get(detect_key)
-            confidence = result["confidences"].get(detect_key, 0.0)
+            bar_result = _resolve_bar_position(detect_key, downbeats)
+            if bar_result is not None:
+                position_samples, confidence = bar_result
+                if position_samples is None:
+                    continue
+            else:
+                raw_pos = result["positions"].get(detect_key)
+                confidence = result["confidences"].get(detect_key, 0.0)
 
-            if raw_pos is None:
-                continue
+                if raw_pos is None:
+                    continue
 
-            position_samples = raw_pos * sr_scale
-            if downbeats:
-                position_samples = snap_to_downbeat(position_samples, downbeats)
+                position_samples = raw_pos * sr_scale
+                if downbeats:
+                    position_samples = snap_to_downbeat(position_samples,
+                                                        downbeats)
 
             existing = cue_data["cues"][cue_index]
             if is_cue_active(existing) and not args.overwrite:

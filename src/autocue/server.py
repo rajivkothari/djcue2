@@ -27,6 +27,16 @@ app = Flask(__name__, static_folder="static")
 _db_path: str | None = None
 
 
+def _resolve_bar_position(detect_key: str, downbeats: list[float]):
+    if not detect_key.startswith("bar_"):
+        return None
+    bar_num = int(detect_key.split("_")[1])
+    idx = bar_num - 1
+    if idx < len(downbeats):
+        return float(downbeats[idx]), 1.0
+    return None, 0.0
+
+
 def set_db_path(path: str):
     global _db_path
     _db_path = path
@@ -212,24 +222,35 @@ def api_analyze():
         color_name = cue_def.get("color", DEFAULT_CUE_COLORS.get(slot, "yellow"))
         is_optional = cue_def.get("optional", False)
 
-        raw_pos = result["positions"].get(detect_key)
-        confidence = result["confidences"].get(detect_key, 0.0)
+        bar_pos = _resolve_bar_position(detect_key, downbeats)
+        if bar_pos is not None:
+            position_samples, confidence = bar_pos
+            if position_samples is None:
+                proposed.append({
+                    "slot": slot, "label": label,
+                    "color_name": color_name,
+                    "color_hex": ENGINE_COLORS_HEX[color_name],
+                    "detected": False, "optional": is_optional,
+                    "confidence": 0.0,
+                })
+                continue
+        else:
+            raw_pos = result["positions"].get(detect_key)
+            confidence = result["confidences"].get(detect_key, 0.0)
 
-        if raw_pos is None:
-            proposed.append({
-                "slot": slot,
-                "label": label,
-                "color_name": color_name,
-                "color_hex": ENGINE_COLORS_HEX[color_name],
-                "detected": False,
-                "optional": is_optional,
-                "confidence": confidence,
-            })
-            continue
+            if raw_pos is None:
+                proposed.append({
+                    "slot": slot, "label": label,
+                    "color_name": color_name,
+                    "color_hex": ENGINE_COLORS_HEX[color_name],
+                    "detected": False, "optional": is_optional,
+                    "confidence": confidence,
+                })
+                continue
 
-        position_samples = raw_pos * sr_scale
-        if downbeats:
-            position_samples = snap_to_downbeat(position_samples, downbeats)
+            position_samples = raw_pos * sr_scale
+            if downbeats:
+                position_samples = snap_to_downbeat(position_samples, downbeats)
         time_seconds = position_samples / sample_rate
 
         has_existing = False

@@ -7,8 +7,8 @@ cues:
     label: "Intro"
     color: yellow
   2:
-    detect: first_vocal
-    label: "Vocal"
+    detect: bar_9
+    label: "Verse"
     color: orange
   3:
     detect: first_chorus
