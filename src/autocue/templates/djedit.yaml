@@ -1,0 +1,28 @@
+name: DJ Edit
+description: Standard DJ edit structure — 8/16/32 bar phrases
+
+cues:
+  1:
+    detect: bar_1
+    label: "Intro"
+    color: yellow
+  2:
+    detect: bar_9
+    label: "Verse"
+    color: orange
+  3:
+    detect: bar_25
+    label: "Chorus"
+    color: purple
+  4:
+    detect: bar_57
+    label: "Breakdown"
+    color: red
+  5:
+    detect: bar_73
+    label: "Drop"
+    color: green
+  6:
+    detect: bar_105
+    label: "Outro"
+    color: teal
