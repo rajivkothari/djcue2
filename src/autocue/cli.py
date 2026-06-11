@@ -58,13 +58,15 @@ def _format_time(seconds: float) -> str:
 
 
 def _resolve_bar_position(detect_key: str, downbeats: list[float]):
-    """Resolve beat-grid detect keys like 'bar_9' to a sample position."""
+    """Resolve beat-grid detect keys like 'bar_9' to a sample position.
+
+    downbeats[0] is beat 0 (before bar 1), so bar N = downbeats[N].
+    """
     if not detect_key.startswith("bar_"):
         return None
     bar_num = int(detect_key.split("_")[1])
-    idx = bar_num - 1
-    if idx < len(downbeats):
-        return float(downbeats[idx]), 1.0
+    if bar_num < len(downbeats):
+        return float(downbeats[bar_num]), 1.0
     return None, 0.0
 
 

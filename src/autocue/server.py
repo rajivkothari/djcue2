@@ -31,9 +31,8 @@ def _resolve_bar_position(detect_key: str, downbeats: list[float]):
     if not detect_key.startswith("bar_"):
         return None
     bar_num = int(detect_key.split("_")[1])
-    idx = bar_num - 1
-    if idx < len(downbeats):
-        return float(downbeats[idx]), 1.0
+    if bar_num < len(downbeats):
+        return float(downbeats[bar_num]), 1.0
     return None, 0.0
 
 
