@@ -1,9 +1,9 @@
 name: Bhangra
-description: Punjabi dance music — heavy dhol, call-and-response vocals
+description: Punjabi dance music — phrasing-based cues every 8 or 16 bars
 
 cues:
   1:
-    detect: mix_in
+    detect: bar_1
     label: "Intro"
     color: yellow
   2:
@@ -11,24 +11,18 @@ cues:
     label: "Verse"
     color: orange
   3:
-    detect: bar_17
+    detect: bar_25
     label: "Hook 1"
     color: purple
   4:
-    detect: second_chorus
+    detect: bar_41
     label: "Hook 2"
     color: red
   5:
-    detect: third_chorus
+    detect: bar_53
     label: "Hook 3"
     color: green
-    optional: true
   6:
-    detect: outro_start
+    detect: bar_61
     label: "Outro"
     color: teal
-
-analysis:
-  intro_energy_percentile: 20
-  drop_energy_ratio: 1.2
-  min_section_seconds: 3.0
