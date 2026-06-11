@@ -668,13 +668,18 @@ def main():
         help="Path to Engine DJ m.db",
     )
 
+    _DB_HELP = "Path to Engine DJ m.db"
+    _DB_DEFAULT = "~/Music/Engine Library/Database2/m.db"
+
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_inspect = sub.add_parser("inspect", help="Inspect cues on a track")
+    p_inspect.add_argument("--db", default=argparse.SUPPRESS, help=_DB_HELP)
     p_inspect.add_argument("track", help="Track title, artist, or ID to search")
     p_inspect.set_defaults(func=cmd_inspect)
 
     p_rt = sub.add_parser("roundtrip", help="Round-trip decode/re-encode test")
+    p_rt.add_argument("--db", default=argparse.SUPPRESS, help=_DB_HELP)
     p_rt.add_argument(
         "--count", type=int, default=50,
         help="Number of tracks to test (default: 50)",
@@ -682,6 +687,7 @@ def main():
     p_rt.set_defaults(func=cmd_roundtrip)
 
     p_set = sub.add_parser("set", help="Set a hot cue on a track")
+    p_set.add_argument("--db", default=argparse.SUPPRESS, help=_DB_HELP)
     p_set.add_argument("track", help="Track title or ID (must match exactly one)")
     p_set.add_argument("--cue", type=int, required=True, help="Cue number (1–8)")
     p_set.add_argument("--at", required=True, help="Position as m:ss.s or seconds")
@@ -698,6 +704,7 @@ def main():
 
     p_analyze = sub.add_parser("analyze",
                                help="Auto-detect and place cues on a track")
+    p_analyze.add_argument("--db", default=argparse.SUPPRESS, help=_DB_HELP)
     p_analyze.add_argument("track",
                            help="Track title or ID (must match exactly one)")
     p_analyze.add_argument(
@@ -713,18 +720,22 @@ def main():
     p_analyze.set_defaults(func=cmd_analyze)
 
     p_lp = sub.add_parser("list-playlists", help="List Engine DJ playlists")
+    p_lp.add_argument("--db", default=argparse.SUPPRESS, help=_DB_HELP)
     p_lp.set_defaults(func=cmd_list_playlists)
 
     p_lc = sub.add_parser("list-crates", help="List Engine DJ crates")
+    p_lc.add_argument("--db", default=argparse.SUPPRESS, help=_DB_HELP)
     p_lc.set_defaults(func=cmd_list_crates)
 
     p_serve = sub.add_parser("serve", help="Launch web GUI for visual cue review")
+    p_serve.add_argument("--db", default=argparse.SUPPRESS, help=_DB_HELP)
     p_serve.add_argument("--host", default="127.0.0.1", help="Host (default: 127.0.0.1)")
     p_serve.add_argument("--port", type=int, default=5555, help="Port (default: 5555)")
     p_serve.set_defaults(func=cmd_serve)
 
     p_batch = sub.add_parser("batch",
                              help="Batch-process a playlist or crate")
+    p_batch.add_argument("--db", default=argparse.SUPPRESS, help=_DB_HELP)
     group = p_batch.add_mutually_exclusive_group(required=True)
     group.add_argument("--playlist", help="Playlist name to process")
     group.add_argument("--crate", help="Crate name to process")
@@ -741,6 +752,8 @@ def main():
     p_batch.set_defaults(func=cmd_batch)
 
     args = parser.parse_args()
+    if not hasattr(args, 'db'):
+        args.db = _DB_DEFAULT
     args.db = str(__import__("pathlib").Path(args.db).expanduser())
 
     if hasattr(args, 'color') and args.color is None and hasattr(args, 'cue'):
