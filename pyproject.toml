@@ -18,6 +18,9 @@ analysis = [
     "scipy>=1.11",
     "pyyaml>=6.0",
 ]
+gui = [
+    "flask>=3.0",
+]
 dev = [
     "pytest>=7.0",
     "pytest-cov",

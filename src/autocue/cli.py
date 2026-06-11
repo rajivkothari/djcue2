@@ -466,6 +466,15 @@ def cmd_list_crates(args):
         print(f"{c['id']:<6} {c['track_count']:<8} {c['title']}")
 
 
+def cmd_serve(args):
+    try:
+        from autocue.server import run_server
+    except ImportError:
+        print("ERROR: GUI requires Flask. Install with: pip install autocue[gui]")
+        sys.exit(1)
+    run_server(args.db, host=args.host, port=args.port)
+
+
 def cmd_batch(args):
     try:
         from autocue.analysis import analyze_structure
@@ -708,6 +717,11 @@ def main():
 
     p_lc = sub.add_parser("list-crates", help="List Engine DJ crates")
     p_lc.set_defaults(func=cmd_list_crates)
+
+    p_serve = sub.add_parser("serve", help="Launch web GUI for visual cue review")
+    p_serve.add_argument("--host", default="127.0.0.1", help="Host (default: 127.0.0.1)")
+    p_serve.add_argument("--port", type=int, default=5555, help="Port (default: 5555)")
+    p_serve.set_defaults(func=cmd_serve)
 
     p_batch = sub.add_parser("batch",
                              help="Batch-process a playlist or crate")
