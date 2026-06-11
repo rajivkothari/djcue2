@@ -66,7 +66,11 @@ def api_schema():
 def api_playlists():
     conn = _conn()
     try:
-        return jsonify(list_playlists(conn))
+        data = list_playlists(conn)
+        return jsonify(data)
+    except Exception as e:
+        print(f"ERROR /api/playlists: {e}")
+        return jsonify({"error": str(e)}), 500
     finally:
         conn.close()
 
@@ -75,19 +79,27 @@ def api_playlists():
 def api_crates():
     conn = _conn()
     try:
-        return jsonify(list_crates(conn))
+        data = list_crates(conn)
+        return jsonify(data)
+    except Exception as e:
+        print(f"ERROR /api/crates: {e}")
+        return jsonify({"error": str(e)}), 500
     finally:
         conn.close()
 
 
 @app.route("/api/templates")
 def api_templates():
-    names = list_templates()
-    result = []
-    for name in names:
-        t = load_template(name)
-        result.append({"id": name, "name": t.get("name", name)})
-    return jsonify(result)
+    try:
+        names = list_templates()
+        result = []
+        for name in names:
+            t = load_template(name)
+            result.append({"id": name, "name": t.get("name", name)})
+        return jsonify(result)
+    except Exception as e:
+        print(f"ERROR /api/templates: {e}")
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/tracks")

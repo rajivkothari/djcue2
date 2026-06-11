@@ -300,32 +300,50 @@ let doneSet = new Set();
 
 async function init() {
   try {
-    const [schemaRes, playlistRes, crateRes, templateRes] = await Promise.all([
-      fetch('/api/schema'), fetch('/api/playlists'), fetch('/api/crates'), fetch('/api/templates')
-    ]);
+    const schemaRes = await fetch('/api/schema');
     const schema = await schemaRes.json();
     document.getElementById('schema-badge').textContent = `Schema ${schema.version || schema.error}`;
 
-    const playlists = await playlistRes.json();
-    const crates = await crateRes.json();
-    const templates = await templateRes.json();
+    const playlistRes = await fetch('/api/playlists');
+    const playlistText = await playlistRes.text();
+    console.log('playlists:', playlistRes.status, playlistText);
+    let playlists = [];
+    try { playlists = JSON.parse(playlistText); } catch(e) { console.error('playlists parse error', e); }
+
+    const crateRes = await fetch('/api/crates');
+    const crateText = await crateRes.text();
+    console.log('crates:', crateRes.status, crateText);
+    let crates = [];
+    try { crates = JSON.parse(crateText); } catch(e) { console.error('crates parse error', e); }
+
+    const templateRes = await fetch('/api/templates');
+    const templateText = await templateRes.text();
+    console.log('templates:', templateRes.status, templateText);
+    let templates = [];
+    try { templates = JSON.parse(templateText); } catch(e) { console.error('templates parse error', e); }
 
     window._playlists = Array.isArray(playlists) ? playlists : [];
     window._crates = Array.isArray(crates) ? crates : [];
+
+    if (window._playlists.length === 0 && window._crates.length === 0) {
+      document.getElementById('empty-state').innerHTML =
+        'No playlists or crates found.<br>Make sure Engine DJ is <b>closed</b>, then restart the server.';
+    }
 
     populateSourceNames();
     document.getElementById('source-type').addEventListener('change', populateSourceNames);
 
     const tSel = document.getElementById('template-select');
     (Array.isArray(templates) ? templates : []).forEach(t => {
-    const opt = document.createElement('option');
-    opt.value = t.id;
-    opt.textContent = t.name;
-    tSel.appendChild(opt);
-  });
+      const opt = document.createElement('option');
+      opt.value = t.id;
+      opt.textContent = t.name;
+      tSel.appendChild(opt);
+    });
   } catch (e) {
     console.error('init failed:', e);
     document.getElementById('schema-badge').textContent = 'Connection error';
+    document.getElementById('empty-state').textContent = 'Failed to connect: ' + e.message;
   }
 }
 
