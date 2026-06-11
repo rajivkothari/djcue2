@@ -299,29 +299,34 @@ let wavesurfer = null;
 let doneSet = new Set();
 
 async function init() {
-  const [schemaRes, playlistRes, crateRes, templateRes] = await Promise.all([
-    fetch('/api/schema'), fetch('/api/playlists'), fetch('/api/crates'), fetch('/api/templates')
-  ]);
-  const schema = await schemaRes.json();
-  document.getElementById('schema-badge').textContent = `Schema ${schema.version || schema.error}`;
+  try {
+    const [schemaRes, playlistRes, crateRes, templateRes] = await Promise.all([
+      fetch('/api/schema'), fetch('/api/playlists'), fetch('/api/crates'), fetch('/api/templates')
+    ]);
+    const schema = await schemaRes.json();
+    document.getElementById('schema-badge').textContent = `Schema ${schema.version || schema.error}`;
 
-  const playlists = await playlistRes.json();
-  const crates = await crateRes.json();
-  const templates = await templateRes.json();
+    const playlists = await playlistRes.json();
+    const crates = await crateRes.json();
+    const templates = await templateRes.json();
 
-  window._playlists = playlists;
-  window._crates = crates;
+    window._playlists = Array.isArray(playlists) ? playlists : [];
+    window._crates = Array.isArray(crates) ? crates : [];
 
-  populateSourceNames();
-  document.getElementById('source-type').addEventListener('change', populateSourceNames);
+    populateSourceNames();
+    document.getElementById('source-type').addEventListener('change', populateSourceNames);
 
-  const tSel = document.getElementById('template-select');
-  templates.forEach(t => {
+    const tSel = document.getElementById('template-select');
+    (Array.isArray(templates) ? templates : []).forEach(t => {
     const opt = document.createElement('option');
     opt.value = t.id;
     opt.textContent = t.name;
     tSel.appendChild(opt);
   });
+  } catch (e) {
+    console.error('init failed:', e);
+    document.getElementById('schema-badge').textContent = 'Connection error';
+  }
 }
 
 function populateSourceNames() {
