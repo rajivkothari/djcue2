@@ -569,6 +569,15 @@ def cmd_batch(args):
             stats["errors"] += 1
             continue
 
+        if track["beat_data_blob"]:
+            bd = decode_beat_data(track["beat_data_blob"])
+            dur_secs = bd["total_samples"] / bd["sample_rate"] if bd["sample_rate"] > 0 else 0
+            if dur_secs > args.max_duration:
+                print(f"{prefix} SKIP {track['title']} — "
+                      f"{_format_time(dur_secs)} exceeds {args.max_duration // 60:.0f}min limit")
+                stats["skipped"] += 1
+                continue
+
         try:
             audio_path = resolve_audio_path(args.db, track["path"])
         except FileNotFoundError:
@@ -778,6 +787,8 @@ def main():
                          help="Show proposed cues without writing")
     p_batch.add_argument("--overwrite", action="store_true",
                          help="Overwrite existing cues on tracks")
+    p_batch.add_argument("--max-duration", type=int, default=900,
+                         help="Skip tracks longer than N seconds (default: 900 = 15min)")
     p_batch.set_defaults(func=cmd_batch)
 
     args = parser.parse_args()
