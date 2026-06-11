@@ -11,7 +11,7 @@ cues:
     label: "Verse"
     color: orange
   3:
-    detect: first_chorus
+    detect: bar_17
     label: "Chorus 1"
     color: purple
   4:

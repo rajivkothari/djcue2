@@ -10,7 +10,6 @@ VALID_DETECT_KEYS = {
     "mix_in", "first_vocal",
     "first_chorus", "second_chorus", "third_chorus",
     "outro_start",
-    "bar_9",
 }
 
 VALID_COLORS = {
@@ -87,10 +86,11 @@ def validate_template(template: dict) -> list[str]:
             continue
 
         detect = cue_def.get("detect")
-        if detect not in VALID_DETECT_KEYS:
+        is_bar_key = isinstance(detect, str) and detect.startswith("bar_") and detect[4:].isdigit()
+        if detect not in VALID_DETECT_KEYS and not is_bar_key:
             errors.append(
                 f"Cue {slot}: unknown detect key '{detect}'. "
-                f"Valid: {', '.join(sorted(VALID_DETECT_KEYS))}"
+                f"Valid: {', '.join(sorted(VALID_DETECT_KEYS))}, bar_N"
             )
 
         color = cue_def.get("color", "").lower()
