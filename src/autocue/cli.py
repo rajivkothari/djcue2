@@ -577,6 +577,17 @@ def cmd_batch(args):
                       f"{_format_time(dur_secs)} exceeds {args.max_duration // 60:.0f}min limit")
                 stats["skipped"] += 1
                 continue
+            if dur_secs < 30:
+                print(f"{prefix} SKIP {track['title']} — "
+                      f"too short ({dur_secs:.0f}s)")
+                stats["skipped"] += 1
+                continue
+
+        existing_cues_blob = track["quick_cues_blob"]
+        if not existing_cues_blob:
+            print(f"{prefix} SKIP {track['title']} — no quickCues blob")
+            stats["skipped"] += 1
+            continue
 
         try:
             audio_path = resolve_audio_path(args.db, track["path"])
@@ -602,11 +613,6 @@ def cmd_batch(args):
         if track["beat_data_blob"]:
             beat_data = decode_beat_data(track["beat_data_blob"])
             downbeats = get_downbeat_positions(beat_data)
-
-        if existing_cues_blob is None:
-            print(f" ERROR: no quickCues blob")
-            stats["errors"] += 1
-            continue
 
         cue_data = decode_quick_cues(existing_cues_blob)
         proposed = []
