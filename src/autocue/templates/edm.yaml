@@ -1,35 +1,28 @@
 name: EDM
-description: Western electronic dance music (house, techno, trance)
+description: Electronic dance music — 16-bar phrasing structure
 
 cues:
   1:
-    detect: mix_in
+    detect: bar_1
     label: "Intro"
     color: yellow
   2:
-    detect: first_vocal
-    label: "Vocal"
+    detect: bar_17
+    label: "Build"
     color: orange
-    optional: true
   3:
-    detect: first_chorus
+    detect: bar_33
     label: "Drop 1"
     color: purple
   4:
-    detect: second_chorus
-    label: "Drop 2"
+    detect: bar_49
+    label: "Break"
     color: red
   5:
-    detect: third_chorus
-    label: "Drop 3"
+    detect: bar_65
+    label: "Drop 2"
     color: green
-    optional: true
   6:
-    detect: outro_start
+    detect: bar_81
     label: "Outro"
     color: teal
-
-analysis:
-  intro_energy_percentile: 25
-  drop_energy_ratio: 1.5
-  min_section_seconds: 4.0
