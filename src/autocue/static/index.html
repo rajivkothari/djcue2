@@ -132,11 +132,14 @@
     bottom: 0;
     width: 2px;
     z-index: 10;
-    pointer-events: none;
+    cursor: pointer;
+    pointer-events: auto;
   }
+  .cue-marker:hover { width: 4px; }
   .cue-marker .cue-flag {
     position: absolute;
     top: 2px;
+    pointer-events: auto;
     left: 2px;
     font-size: 10px;
     padding: 1px 5px;
@@ -227,6 +230,33 @@
 
   .overwrite-toggle { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--fg2); }
   .overwrite-toggle input { accent-color: var(--accent); }
+
+  .btn-play {
+    background: none;
+    border: 1px solid var(--border);
+    color: var(--accent);
+    cursor: pointer;
+    border-radius: 50%;
+    width: 28px;
+    height: 28px;
+    font-size: 12px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    transition: background 0.15s;
+  }
+  .btn-play:hover { background: var(--bg3); }
+  .btn-stop {
+    background: none;
+    border: 1px solid var(--border);
+    color: var(--warning);
+    cursor: pointer;
+    border-radius: 4px;
+    padding: 4px 10px;
+    font-size: 13px;
+  }
+  .btn-stop:hover { background: var(--bg3); }
 </style>
 </head>
 <body>
@@ -267,7 +297,10 @@
         <div id="cue-markers"></div>
       </div>
 
-      <div class="status-bar" id="status-bar">Ready</div>
+      <div style="display:flex; align-items:center; gap:8px; margin-bottom:4px;">
+        <div class="status-bar" id="status-bar" style="flex:1; margin:0;">Ready</div>
+        <button class="btn-stop" onclick="stopPreview()">&#9632; Stop</button>
+      </div>
 
       <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 8px;">
         <label class="overwrite-toggle">
@@ -277,7 +310,7 @@
 
       <table class="cue-table" id="cue-table">
         <thead>
-          <tr><th>Slot</th><th>Label</th><th>Time</th><th>Color</th><th>Confidence</th><th>Status</th></tr>
+          <tr><th></th><th>Slot</th><th>Label</th><th>Time</th><th>Color</th><th>Confidence</th><th>Status</th></tr>
         </thead>
         <tbody id="cue-tbody"></tbody>
       </table>
@@ -495,7 +528,11 @@ function renderProposedCues(data) {
       status = 'Will write';
     }
     const confClass = cue.confidence >= 0.4 ? 'conf-ok' : 'conf-low';
+    const playBtn = cue.detected && cue.time_seconds != null
+      ? `<button class="btn-play" onclick="previewCue(${cue.time_seconds})">&#9654;</button>`
+      : '';
     tr.innerHTML = `
+      <td>${playBtn}</td>
       <td>${cue.slot}</td>
       <td>${esc(cue.label)}</td>
       <td>${cue.detected ? cue.time_display : '—'}</td>
@@ -528,6 +565,7 @@ function renderCueMarkers(data) {
     marker.style.left = pct + '%';
     marker.style.backgroundColor = cue.color_hex;
     marker.innerHTML = `<span class="cue-flag" style="background:${cue.color_hex}">${cue.slot} ${esc(cue.label)}</span>`;
+    marker.onclick = () => previewCue(cue.time_seconds);
     container.appendChild(marker);
   });
 }
@@ -584,6 +622,35 @@ function nextTrack() {
   } else {
     document.getElementById('status-bar').innerHTML =
       '<span style="color:var(--success)">All tracks reviewed!</span>';
+  }
+}
+
+let previewTimeout = null;
+
+function previewCue(timeSeconds) {
+  if (!wavesurfer) return;
+  const duration = wavesurfer.getDuration();
+  if (!duration || duration <= 0) return;
+
+  if (previewTimeout) {
+    clearTimeout(previewTimeout);
+    previewTimeout = null;
+  }
+
+  wavesurfer.seekTo(timeSeconds / duration);
+  wavesurfer.play();
+
+  previewTimeout = setTimeout(() => {
+    wavesurfer.pause();
+    previewTimeout = null;
+  }, 8000);
+}
+
+function stopPreview() {
+  if (wavesurfer) wavesurfer.pause();
+  if (previewTimeout) {
+    clearTimeout(previewTimeout);
+    previewTimeout = null;
   }
 }
 
