@@ -9,6 +9,7 @@ from flask import Flask, jsonify, request, send_file, send_from_directory
 from autocue.codec import (
     decode_quick_cues, encode_quick_cues, decode_beat_data,
     is_cue_active, snap_to_downbeat, get_downbeat_positions,
+    get_beat_positions, get_samples_per_beat, get_main_cue,
     CUE_POSITION_EMPTY,
 )
 from autocue.constants import (
@@ -27,13 +28,21 @@ app = Flask(__name__, static_folder="static")
 _db_path: str | None = None
 
 
-def _resolve_bar_position(detect_key: str, downbeats: list[float]):
+def _resolve_bar_position(detect_key, anchor, samples_per_beat, beats,
+                          beat_offset=0):
     if not detect_key.startswith("bar_"):
         return None
+    if anchor is None or samples_per_beat is None:
+        return None, 0.0
     bar_num = int(detect_key.split("_")[1])
-    if bar_num < len(downbeats):
-        return float(downbeats[bar_num]), 1.0
-    return None, 0.0
+    ideal = anchor + ((bar_num - 1) * 4 + beat_offset) * samples_per_beat
+    if beats:
+        nearest = min(beats, key=lambda b: abs(b - ideal))
+        if abs(nearest - ideal) <= samples_per_beat * 0.25:
+            ideal = nearest
+    if ideal < 0:
+        return None, 0.0
+    return float(ideal), 1.0
 
 
 def set_db_path(path: str):
@@ -180,11 +189,7 @@ def api_analyze():
     track_id = data.get("track_id")
     template_name = data.get("template", "edm")
     overwrite = data.get("overwrite", False)
-
-    try:
-        from autocue.analysis import analyze_structure
-    except ImportError as e:
-        return jsonify({"error": str(e)}), 500
+    beat_offset = int(data.get("beat_offset", 0))
 
     conn = _conn()
     try:
@@ -199,30 +204,51 @@ def api_analyze():
     track = tracks[0]
     template = load_template(template_name)
     analysis_params = template.get("analysis", {})
+    template_cues = template["cues"]
 
-    if not track["path"]:
-        return jsonify({"error": "No file path for track"}), 400
+    needs_analysis = any(
+        not cue_def["detect"].startswith("bar_")
+        for cue_def in template_cues.values()
+    )
 
-    try:
-        audio_path = resolve_audio_path(_db_path, track["path"])
-    except FileNotFoundError:
-        return jsonify({"error": "Audio file not found"}), 404
-
-    result = analyze_structure(str(audio_path), **analysis_params)
-
-    analysis_sr = result["sample_rate"]
     sample_rate = get_sample_rate(track)
-    sr_scale = sample_rate / analysis_sr if analysis_sr != sample_rate else 1.0
 
     downbeats = []
+    beats = []
+    samples_per_beat = None
     if track["beat_data_blob"]:
         beat_data = decode_beat_data(track["beat_data_blob"])
         downbeats = get_downbeat_positions(beat_data)
+        beats = get_beat_positions(beat_data)
+        samples_per_beat = get_samples_per_beat(beat_data)
 
-    template_cues = template["cues"]
     existing_cue_data = None
     if track["quick_cues_blob"]:
         existing_cue_data = decode_quick_cues(track["quick_cues_blob"])
+
+    anchor = get_main_cue(existing_cue_data) if existing_cue_data else None
+    if anchor is None:
+        anchor = downbeats[0] if downbeats else (beats[0] if beats else None)
+
+    result = None
+    sr_scale = 1.0
+    if needs_analysis:
+        try:
+            from autocue.analysis import analyze_structure
+        except ImportError as e:
+            return jsonify({"error": str(e)}), 500
+
+        if not track["path"]:
+            return jsonify({"error": "No file path for track"}), 400
+
+        try:
+            audio_path = resolve_audio_path(_db_path, track["path"])
+        except FileNotFoundError:
+            return jsonify({"error": "Audio file not found"}), 404
+
+        result = analyze_structure(str(audio_path), **analysis_params)
+        analysis_sr = result["sample_rate"]
+        sr_scale = sample_rate / analysis_sr if analysis_sr != sample_rate else 1.0
 
     proposed = []
     for slot_key, cue_def in sorted(template_cues.items(), key=lambda x: int(x[0])):
@@ -233,7 +259,8 @@ def api_analyze():
         color_name = cue_def.get("color", DEFAULT_CUE_COLORS.get(slot, "yellow"))
         is_optional = cue_def.get("optional", False)
 
-        bar_pos = _resolve_bar_position(detect_key, downbeats)
+        bar_pos = _resolve_bar_position(
+            detect_key, anchor, samples_per_beat, beats, beat_offset=beat_offset)
         if bar_pos is not None:
             position_samples, confidence = bar_pos
             if position_samples is None:
@@ -246,6 +273,8 @@ def api_analyze():
                 })
                 continue
         else:
+            if result is None:
+                continue
             raw_pos = result["positions"].get(detect_key)
             confidence = result["confidences"].get(detect_key, 0.0)
 

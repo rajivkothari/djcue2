@@ -20,6 +20,9 @@ from autocue.codec import (
     CUE_POSITION_EMPTY,
     snap_to_downbeat,
     get_downbeat_positions,
+    get_beat_positions,
+    get_samples_per_beat,
+    get_main_cue,
 )
 
 
@@ -239,3 +242,56 @@ class TestDownbeats:
         downbeats = get_downbeat_positions(beat_data)
         assert len(downbeats) == 4
         assert downbeats[0] == 0.0
+
+
+class TestBarAnchoring:
+    def _grid(self):
+        return {
+            "sample_rate": 44100.0,
+            "total_samples": 44100.0 * 120,
+            "is_beatgrid_set": True,
+            "default_markers": [
+                {"sample_offset": 0.0, "beat_number": 0,
+                 "number_of_beats": 400, "unknown_value_1": 0},
+                {"sample_offset": 44100.0 * 200, "beat_number": 400,
+                 "number_of_beats": 0, "unknown_value_1": 0},
+            ],
+            "adjusted_markers": [],
+            "extra_data": b"",
+        }
+
+    def test_samples_per_beat(self):
+        # 400 beats over 200 seconds at 44100 Hz => 0.5s per beat
+        spb = get_samples_per_beat(self._grid())
+        assert spb == pytest.approx(22050.0)
+
+    def test_beat_positions_span_grid(self):
+        beats = get_beat_positions(self._grid())
+        assert beats[0] == 0.0
+        assert beats[1] == pytest.approx(22050.0)
+        # includes the final marker
+        assert beats[-1] == pytest.approx(44100.0 * 200)
+
+    def test_samples_per_beat_needs_two_markers(self):
+        grid = self._grid()
+        grid["default_markers"] = grid["default_markers"][:1]
+        grid["adjusted_markers"] = []
+        assert get_samples_per_beat(grid) is None
+
+    def test_main_cue_uses_adjusted_when_flagged(self):
+        data = {"adjusted_main_cue": 5000.0, "is_main_cue_adjusted": True,
+                "default_main_cue": 9999.0}
+        assert get_main_cue(data) == 5000.0
+
+    def test_main_cue_uses_default_when_not_adjusted(self):
+        data = {"adjusted_main_cue": 5000.0, "is_main_cue_adjusted": False,
+                "default_main_cue": 9999.0}
+        assert get_main_cue(data) == 9999.0
+
+    def test_main_cue_none_when_unset(self):
+        data = {"adjusted_main_cue": 0.0, "is_main_cue_adjusted": False,
+                "default_main_cue": 0.0}
+        assert get_main_cue(data) is None
+        data2 = {"adjusted_main_cue": -1.0, "is_main_cue_adjusted": True,
+                 "default_main_cue": -1.0}
+        assert get_main_cue(data2) is None

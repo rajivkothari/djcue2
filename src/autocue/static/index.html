@@ -229,7 +229,17 @@
   }
 
   .overwrite-toggle { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--fg2); }
-  .overwrite-toggle input { accent-color: var(--accent); }
+  .overwrite-toggle input[type=checkbox] { accent-color: var(--accent); }
+  .overwrite-toggle input[type=number] {
+    background: var(--bg3); color: var(--fg);
+    border: 1px solid var(--border); border-radius: 4px; padding: 3px;
+  }
+  .btn-nudge {
+    background: var(--bg3); color: var(--fg);
+    border: 1px solid var(--border); border-radius: 4px;
+    width: 24px; height: 24px; cursor: pointer; font-size: 14px; line-height: 1;
+  }
+  .btn-nudge:hover { background: var(--accent); }
 
   .btn-play {
     background: none;
@@ -305,6 +315,12 @@
       <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 8px;">
         <label class="overwrite-toggle">
           <input type="checkbox" id="overwrite-check"> Overwrite existing cues
+        </label>
+        <label class="overwrite-toggle">
+          Beat offset
+          <button class="btn-nudge" onclick="nudgeOffset(-1)">&minus;</button>
+          <input type="number" id="beat-offset" value="0" style="width:48px; text-align:center;">
+          <button class="btn-nudge" onclick="nudgeOffset(1)">+</button>
         </label>
       </div>
 
@@ -482,10 +498,17 @@ function loadWaveform(trackId) {
   });
 }
 
+function nudgeOffset(delta) {
+  const el = document.getElementById('beat-offset');
+  el.value = (parseInt(el.value, 10) || 0) + delta;
+  if (tracks[currentIdx]) analyzeTrack();
+}
+
 async function analyzeTrack() {
   const track = tracks[currentIdx];
   const template = document.getElementById('template-select').value;
   const overwrite = document.getElementById('overwrite-check').checked;
+  const beatOffset = parseInt(document.getElementById('beat-offset').value, 10) || 0;
 
   document.getElementById('analyze-btn').disabled = true;
   document.getElementById('status-bar').innerHTML = '<div class="spinner"></div> Analyzing...';
@@ -494,7 +517,7 @@ async function analyzeTrack() {
     const res = await fetch('/api/analyze', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ track_id: track.id, template, overwrite }),
+      body: JSON.stringify({ track_id: track.id, template, overwrite, beat_offset: beatOffset }),
     });
     const data = await res.json();
     if (data.error) {

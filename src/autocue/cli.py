@@ -11,6 +11,7 @@ from autocue.codec import (
     decode_quick_cues, encode_quick_cues,
     decode_beat_data, decode_track_data,
     is_cue_active, snap_to_downbeat, get_downbeat_positions,
+    get_beat_positions, get_samples_per_beat, get_main_cue,
     CUE_POSITION_EMPTY,
 )
 
@@ -57,17 +58,30 @@ def _format_time(seconds: float) -> str:
     return f"{minutes}:{secs:05.2f}"
 
 
-def _resolve_bar_position(detect_key: str, downbeats: list[float]):
+def _resolve_bar_position(detect_key, anchor, samples_per_beat, beats,
+                          beat_offset=0):
     """Resolve beat-grid detect keys like 'bar_9' to a sample position.
 
-    downbeats[0] is beat 0 (before bar 1), so bar N = downbeats[N].
+    Bar 1 is anchored at `anchor` (the main cue, which sits on the true
+    downbeat). Bar N is anchor + (N-1)*4 beats, plus an optional manual
+    beat_offset correction, then snapped to the nearest actual grid beat.
     """
     if not detect_key.startswith("bar_"):
         return None
+    if anchor is None or samples_per_beat is None:
+        return None, 0.0
     bar_num = int(detect_key.split("_")[1])
-    if bar_num < len(downbeats):
-        return float(downbeats[bar_num]), 1.0
-    return None, 0.0
+    ideal = anchor + ((bar_num - 1) * 4 + beat_offset) * samples_per_beat
+    if beats:
+        nearest = min(beats, key=lambda b: abs(b - ideal))
+        # Snap only for micro-drift (within a quarter beat). A larger gap
+        # means the grid is phase-shifted — honor the main-cue math instead
+        # of re-applying that shift.
+        if abs(nearest - ideal) <= samples_per_beat * 0.25:
+            ideal = nearest
+    if ideal < 0:
+        return None, 0.0
+    return float(ideal), 1.0
 
 
 def cmd_inspect(args):
@@ -322,9 +336,13 @@ def cmd_analyze(args):
     sr_scale = sample_rate / analysis_sr if analysis_sr != sample_rate else 1.0
 
     downbeats = []
+    beats = []
+    samples_per_beat = None
     if track["beat_data_blob"]:
         beat_data = decode_beat_data(track["beat_data_blob"])
         downbeats = get_downbeat_positions(beat_data)
+        beats = get_beat_positions(beat_data)
+        samples_per_beat = get_samples_per_beat(beat_data)
 
     if track["quick_cues_blob"] is None:
         print("ERROR: Track has no quickCues blob. "
@@ -333,6 +351,16 @@ def cmd_analyze(args):
 
     cue_data = decode_quick_cues(track["quick_cues_blob"])
     template_cues = template["cues"]
+
+    anchor = get_main_cue(cue_data)
+    anchor_src = "main cue"
+    if anchor is None:
+        anchor = downbeats[0] if downbeats else (beats[0] if beats else None)
+        anchor_src = "grid"
+    beat_offset = getattr(args, "beat_offset", 0)
+    if anchor is not None:
+        print(f"Bar-1 anchor: {_format_time(anchor / sample_rate)} "
+              f"({anchor_src}), beat offset: {beat_offset}")
 
     proposed = []
     skipped_existing = []
@@ -348,7 +376,8 @@ def cmd_analyze(args):
         color_name = cue_def.get("color", DEFAULT_CUE_COLORS.get(slot, "yellow"))
         is_optional = cue_def.get("optional", False)
 
-        bar_result = _resolve_bar_position(detect_key, downbeats)
+        bar_result = _resolve_bar_position(
+            detect_key, anchor, samples_per_beat, beats, beat_offset=beat_offset)
         if bar_result is not None:
             position_samples, confidence = bar_result
             if position_samples is None:
@@ -595,14 +624,28 @@ def cmd_batch(args):
             continue
 
         downbeats = []
+        beats = []
+        samples_per_beat = None
         if track["beat_data_blob"]:
             beat_data = decode_beat_data(track["beat_data_blob"])
             downbeats = get_downbeat_positions(beat_data)
+            beats = get_beat_positions(beat_data)
+            samples_per_beat = get_samples_per_beat(beat_data)
 
-        if not downbeats:
+        if not beats or samples_per_beat is None:
             print(f"{prefix} SKIP {track['title']} — no beat grid")
             stats["skipped"] += 1
             continue
+
+        cue_data = decode_quick_cues(existing_cues_blob)
+
+        # Anchor bar 1 to the main cue (the true downbeat); fall back to
+        # the grid's first downbeat when no main cue is set.
+        anchor = get_main_cue(cue_data)
+        anchor_src = "main cue"
+        if anchor is None:
+            anchor = downbeats[0] if downbeats else beats[0]
+            anchor_src = "grid"
 
         sample_rate = _get_sample_rate(track)
         result = None
@@ -627,10 +670,9 @@ def cmd_batch(args):
             analysis_sr = result["sample_rate"]
             sr_scale = sample_rate / analysis_sr if analysis_sr != sample_rate else 1.0
         else:
-            print(f"{prefix} {track['title']} ({len(downbeats)} bars)...",
+            print(f"{prefix} {track['title']} (anchor: {anchor_src})...",
                   end="", flush=True)
 
-        cue_data = decode_quick_cues(existing_cues_blob)
         proposed = []
         track_low_conf = False
 
@@ -644,12 +686,13 @@ def cmd_batch(args):
                                      DEFAULT_CUE_COLORS.get(slot, "yellow"))
             is_optional = cue_def.get("optional", False)
 
-            bar_result = _resolve_bar_position(detect_key, downbeats)
+            bar_result = _resolve_bar_position(
+                detect_key, anchor, samples_per_beat, beats,
+                beat_offset=args.beat_offset)
             if bar_result is not None:
                 position_samples, confidence = bar_result
                 if position_samples is None:
-                    print(f" [cue {slot}: {detect_key} out of range"
-                          f" ({len(downbeats)} bars)]", end="")
+                    print(f" [cue {slot}: {detect_key} unresolved]", end="")
                     continue
             else:
                 if result is None:
@@ -781,6 +824,8 @@ def main():
                            help="Show proposed cues without writing")
     p_analyze.add_argument("--overwrite", action="store_true",
                            help="Overwrite existing cues in matched slots")
+    p_analyze.add_argument("--beat-offset", type=int, default=0,
+                           help="Shift all bar cues by N beats (can be negative)")
     p_analyze.set_defaults(func=cmd_analyze)
 
     p_lp = sub.add_parser("list-playlists", help="List Engine DJ playlists")
@@ -815,6 +860,9 @@ def main():
                          help="Overwrite existing cues on tracks")
     p_batch.add_argument("--max-duration", type=int, default=900,
                          help="Skip tracks longer than N seconds (default: 900 = 15min)")
+    p_batch.add_argument("--beat-offset", type=int, default=0,
+                         help="Shift all bar cues by N beats to correct a "
+                              "systematic grid phase error (can be negative)")
     p_batch.set_defaults(func=cmd_batch)
 
     args = parser.parse_args()

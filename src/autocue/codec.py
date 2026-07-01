@@ -289,3 +289,51 @@ def snap_to_downbeat(position_samples: float, downbeats: list[float]) -> float:
     if not downbeats:
         return position_samples
     return min(downbeats, key=lambda d: abs(d - position_samples))
+
+
+def get_beat_positions(beat_data: dict) -> list[float]:
+    """Extract every beat's sample position from the grid (not just downbeats)."""
+    markers = beat_data["adjusted_markers"] or beat_data["default_markers"]
+    if not markers or not beat_data["is_beatgrid_set"]:
+        return []
+
+    beats = []
+    for i in range(len(markers) - 1):
+        start_sample = markers[i]["sample_offset"]
+        start_beat = markers[i]["beat_number"]
+        end_sample = markers[i + 1]["sample_offset"]
+        end_beat = markers[i + 1]["beat_number"]
+        if end_beat <= start_beat:
+            continue
+        spb = (end_sample - start_sample) / (end_beat - start_beat)
+        for beat_num in range(int(start_beat), int(end_beat)):
+            beats.append(start_sample + (beat_num - start_beat) * spb)
+
+    if markers:
+        beats.append(markers[-1]["sample_offset"])
+    return beats
+
+
+def get_samples_per_beat(beat_data: dict) -> float | None:
+    """Average samples-per-beat across the whole grid."""
+    markers = beat_data["adjusted_markers"] or beat_data["default_markers"]
+    if len(markers) < 2:
+        return None
+    first, last = markers[0], markers[-1]
+    beat_span = last["beat_number"] - first["beat_number"]
+    if beat_span <= 0:
+        return None
+    return (last["sample_offset"] - first["sample_offset"]) / beat_span
+
+
+def get_main_cue(quick_cues_data: dict) -> float | None:
+    """The main/load cue position, which typically sits on the true bar 1.
+
+    Returns None if no usable main cue is set.
+    """
+    cue = (quick_cues_data["adjusted_main_cue"]
+           if quick_cues_data["is_main_cue_adjusted"]
+           else quick_cues_data["default_main_cue"])
+    if cue is None or cue <= 0:
+        return None
+    return float(cue)
