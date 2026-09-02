@@ -21,6 +21,13 @@ analysis = [
 gui = [
     "flask>=3.0",
 ]
+beats = [
+    "beat-this",
+    "torch>=2.0",
+    "torchaudio>=2.0",
+    "numpy>=1.24",
+    "soundfile>=0.12",
+]
 dev = [
     "pytest>=7.0",
     "pytest-cov",

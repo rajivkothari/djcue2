@@ -230,7 +230,7 @@
 
   .overwrite-toggle { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--fg2); }
   .overwrite-toggle input[type=checkbox] { accent-color: var(--accent); }
-  .overwrite-toggle input[type=number] {
+  .overwrite-toggle input[type=number], .overwrite-toggle select {
     background: var(--bg3); color: var(--fg);
     border: 1px solid var(--border); border-radius: 4px; padding: 3px;
   }
@@ -321,6 +321,15 @@
           <button class="btn-nudge" onclick="nudgeOffset(-1)">&minus;</button>
           <input type="number" id="beat-offset" value="0" style="width:48px; text-align:center;">
           <button class="btn-nudge" onclick="nudgeOffset(1)">+</button>
+        </label>
+        <label class="overwrite-toggle" title="Where bar 1 comes from. Auto = main cue, then AI downbeat, then Engine's grid.">
+          Bar 1
+          <select id="anchor-mode" onchange="if (tracks[currentIdx]) analyzeTrack()">
+            <option value="auto">Auto</option>
+            <option value="main-cue">Main cue</option>
+            <option value="ai">AI downbeat</option>
+            <option value="grid">Grid</option>
+          </select>
         </label>
       </div>
 
@@ -498,6 +507,17 @@ function loadWaveform(trackId) {
   });
 }
 
+function describeAnchor(a) {
+  if (!a) return 'Analysis complete.';
+  const cands = Object.entries(a.candidates || {})
+    .filter(([, t]) => t)
+    .map(([name, t]) => `${esc(name)} ${t}`)
+    .join(', ');
+  let s = `Bar 1 from <strong>${esc(a.source)}</strong>` + (cands ? ` (${cands}).` : '.');
+  if (a.note) s += ` <span style="color:var(--warning)">${esc(a.note)}</span>`;
+  return s;
+}
+
 function nudgeOffset(delta) {
   const el = document.getElementById('beat-offset');
   el.value = (parseInt(el.value, 10) || 0) + delta;
@@ -509,6 +529,7 @@ async function analyzeTrack() {
   const template = document.getElementById('template-select').value;
   const overwrite = document.getElementById('overwrite-check').checked;
   const beatOffset = parseInt(document.getElementById('beat-offset').value, 10) || 0;
+  const anchorMode = document.getElementById('anchor-mode').value;
 
   document.getElementById('analyze-btn').disabled = true;
   document.getElementById('status-bar').innerHTML = '<div class="spinner"></div> Analyzing...';
@@ -517,7 +538,7 @@ async function analyzeTrack() {
     const res = await fetch('/api/analyze', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ track_id: track.id, template, overwrite, beat_offset: beatOffset }),
+      body: JSON.stringify({ track_id: track.id, template, overwrite, beat_offset: beatOffset, anchor: anchorMode }),
     });
     const data = await res.json();
     if (data.error) {
@@ -529,7 +550,8 @@ async function analyzeTrack() {
     proposedCues = data;
     renderProposedCues(data);
     renderCueMarkers(data);
-    document.getElementById('status-bar').innerHTML = `Analysis complete. Review cues below, then <strong>Finalize</strong> or <strong>Skip</strong>.`;
+    document.getElementById('status-bar').innerHTML = describeAnchor(data.anchor) +
+      ` Review cues below, then <strong>Finalize</strong> or <strong>Skip</strong>.`;
     document.getElementById('finalize-btn').disabled = false;
   } catch (e) {
     document.getElementById('status-bar').innerHTML = `<span style="color:var(--warning)">Error: ${esc(String(e))}</span>`;

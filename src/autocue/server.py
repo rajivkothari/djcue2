@@ -12,6 +12,7 @@ from autocue.codec import (
     get_beat_positions, get_samples_per_beat, get_main_cue,
     CUE_POSITION_EMPTY,
 )
+from autocue.anchor import pick_anchor, resolve_bar_position, ANCHOR_MODES
 from autocue.constants import (
     ENGINE_COLORS, ENGINE_COLORS_HEX, DEFAULT_CUE_COLORS, get_sample_rate,
     format_time,
@@ -28,21 +29,14 @@ app = Flask(__name__, static_folder="static")
 _db_path: str | None = None
 
 
-def _resolve_bar_position(detect_key, anchor, samples_per_beat, beats,
-                          beat_offset=0):
-    if not detect_key.startswith("bar_"):
-        return None
-    if anchor is None or samples_per_beat is None:
-        return None, 0.0
-    bar_num = int(detect_key.split("_")[1])
-    ideal = anchor + ((bar_num - 1) * 4 + beat_offset) * samples_per_beat
-    if beats:
-        nearest = min(beats, key=lambda b: abs(b - ideal))
-        if abs(nearest - ideal) <= samples_per_beat * 0.25:
-            ideal = nearest
-    if ideal < 0:
-        return None, 0.0
-    return float(ideal), 1.0
+def _ai_detector(audio_path):
+    """Zero-arg callable that runs Beat This! only if the anchor needs it."""
+    def _detect():
+        if audio_path is None:
+            raise FileNotFoundError("audio file not found")
+        from autocue.beats import detect_first_downbeat
+        return detect_first_downbeat(str(audio_path))
+    return _detect
 
 
 def set_db_path(path: str):
@@ -190,6 +184,9 @@ def api_analyze():
     template_name = data.get("template", "edm")
     overwrite = data.get("overwrite", False)
     beat_offset = int(data.get("beat_offset", 0))
+    anchor_mode = data.get("anchor", "auto")
+    if anchor_mode not in ANCHOR_MODES:
+        return jsonify({"error": f"Unknown anchor mode '{anchor_mode}'"}), 400
 
     conn = _conn()
     try:
@@ -226,9 +223,19 @@ def api_analyze():
     if track["quick_cues_blob"]:
         existing_cue_data = decode_quick_cues(track["quick_cues_blob"])
 
-    anchor = get_main_cue(existing_cue_data) if existing_cue_data else None
-    if anchor is None:
-        anchor = downbeats[0] if downbeats else (beats[0] if beats else None)
+    audio_path = None
+    if track["path"]:
+        try:
+            audio_path = resolve_audio_path(_db_path, track["path"])
+        except FileNotFoundError:
+            audio_path = None
+
+    main_cue = get_main_cue(existing_cue_data) if existing_cue_data else None
+    picked = pick_anchor(
+        anchor_mode, main_cue=main_cue, downbeats=downbeats, beats=beats,
+        samples_per_beat=samples_per_beat, sample_rate=sample_rate,
+        detect_first_downbeat=_ai_detector(audio_path))
+    anchor = picked["anchor"]
 
     result = None
     sr_scale = 1.0
@@ -238,12 +245,7 @@ def api_analyze():
         except ImportError as e:
             return jsonify({"error": str(e)}), 500
 
-        if not track["path"]:
-            return jsonify({"error": "No file path for track"}), 400
-
-        try:
-            audio_path = resolve_audio_path(_db_path, track["path"])
-        except FileNotFoundError:
+        if audio_path is None:
             return jsonify({"error": "Audio file not found"}), 404
 
         result = analyze_structure(str(audio_path), **analysis_params)
@@ -259,7 +261,7 @@ def api_analyze():
         color_name = cue_def.get("color", DEFAULT_CUE_COLORS.get(slot, "yellow"))
         is_optional = cue_def.get("optional", False)
 
-        bar_pos = _resolve_bar_position(
+        bar_pos = resolve_bar_position(
             detect_key, anchor, samples_per_beat, beats, beat_offset=beat_offset)
         if bar_pos is not None:
             position_samples, confidence = bar_pos
@@ -318,6 +320,15 @@ def api_analyze():
         "template": template_name,
         "sample_rate": sample_rate,
         "proposed": proposed,
+        "anchor": {
+            "source": picked["source"],
+            "note": picked["note"],
+            "candidates": {
+                name.replace("_", " "): (format_time(v / sample_rate)
+                                         if v is not None else None)
+                for name, v in picked["candidates"].items()
+            },
+        },
     })
 
 

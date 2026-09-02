@@ -14,6 +14,7 @@ from autocue.codec import (
     get_beat_positions, get_samples_per_beat, get_main_cue,
     CUE_POSITION_EMPTY,
 )
+from autocue.anchor import pick_anchor, resolve_bar_position, ANCHOR_MODES
 
 
 ENGINE_COLORS = {
@@ -58,30 +59,30 @@ def _format_time(seconds: float) -> str:
     return f"{minutes}:{secs:05.2f}"
 
 
-def _resolve_bar_position(detect_key, anchor, samples_per_beat, beats,
-                          beat_offset=0):
-    """Resolve beat-grid detect keys like 'bar_9' to a sample position.
+def _ai_detector(audio_path):
+    """Zero-arg callable that runs Beat This! on demand.
 
-    Bar 1 is anchored at `anchor` (the main cue, which sits on the true
-    downbeat). Bar N is anchor + (N-1)*4 beats, plus an optional manual
-    beat_offset correction, then snapped to the nearest actual grid beat.
+    Deferred so the model only loads (and the checkpoint only downloads)
+    for tracks whose anchor mode actually needs it.
     """
-    if not detect_key.startswith("bar_"):
-        return None
-    if anchor is None or samples_per_beat is None:
-        return None, 0.0
-    bar_num = int(detect_key.split("_")[1])
-    ideal = anchor + ((bar_num - 1) * 4 + beat_offset) * samples_per_beat
-    if beats:
-        nearest = min(beats, key=lambda b: abs(b - ideal))
-        # Snap only for micro-drift (within a quarter beat). A larger gap
-        # means the grid is phase-shifted — honor the main-cue math instead
-        # of re-applying that shift.
-        if abs(nearest - ideal) <= samples_per_beat * 0.25:
-            ideal = nearest
-    if ideal < 0:
-        return None, 0.0
-    return float(ideal), 1.0
+    def _detect():
+        if audio_path is None:
+            raise FileNotFoundError("audio file not found")
+        from autocue.beats import detect_first_downbeat
+        return detect_first_downbeat(str(audio_path))
+    return _detect
+
+
+def _describe_anchor(picked: dict, sample_rate: float) -> str:
+    parts = []
+    for name in ("main_cue", "ai", "grid"):
+        v = picked["candidates"].get(name)
+        if v is not None:
+            parts.append(f"{name.replace('_', ' ')}={_format_time(v / sample_rate)}")
+    s = f"anchor: {picked['source']} [{', '.join(parts)}]"
+    if picked["note"]:
+        s += f" ({picked['note']})"
+    return s
 
 
 def cmd_inspect(args):
@@ -352,15 +353,14 @@ def cmd_analyze(args):
     cue_data = decode_quick_cues(track["quick_cues_blob"])
     template_cues = template["cues"]
 
-    anchor = get_main_cue(cue_data)
-    anchor_src = "main cue"
-    if anchor is None:
-        anchor = downbeats[0] if downbeats else (beats[0] if beats else None)
-        anchor_src = "grid"
     beat_offset = getattr(args, "beat_offset", 0)
-    if anchor is not None:
-        print(f"Bar-1 anchor: {_format_time(anchor / sample_rate)} "
-              f"({anchor_src}), beat offset: {beat_offset}")
+    picked = pick_anchor(
+        getattr(args, "anchor", "auto"), main_cue=get_main_cue(cue_data),
+        downbeats=downbeats, beats=beats, samples_per_beat=samples_per_beat,
+        sample_rate=sample_rate, detect_first_downbeat=_ai_detector(audio_path))
+    anchor = picked["anchor"]
+    print(f"Bar-1 {_describe_anchor(picked, sample_rate)}, "
+          f"beat offset: {beat_offset}")
 
     proposed = []
     skipped_existing = []
@@ -376,7 +376,7 @@ def cmd_analyze(args):
         color_name = cue_def.get("color", DEFAULT_CUE_COLORS.get(slot, "yellow"))
         is_optional = cue_def.get("optional", False)
 
-        bar_result = _resolve_bar_position(
+        bar_result = resolve_bar_position(
             detect_key, anchor, samples_per_beat, beats, beat_offset=beat_offset)
         if bar_result is not None:
             position_samples, confidence = bar_result
@@ -583,7 +583,7 @@ def cmd_batch(args):
     )
 
     stats = {"processed": 0, "cues_written": 0, "skipped": 0,
-             "errors": 0, "low_confidence": []}
+             "errors": 0, "low_confidence": [], "anchors": {}}
 
     for i, track in enumerate(tracks):
         prefix = f"[{i+1}/{len(tracks)}]"
@@ -638,27 +638,36 @@ def cmd_batch(args):
             continue
 
         cue_data = decode_quick_cues(existing_cues_blob)
-
-        # Anchor bar 1 to the main cue (the true downbeat); fall back to
-        # the grid's first downbeat when no main cue is set.
-        anchor = get_main_cue(cue_data)
-        anchor_src = "main cue"
-        if anchor is None:
-            anchor = downbeats[0] if downbeats else beats[0]
-            anchor_src = "grid"
-
         sample_rate = _get_sample_rate(track)
+
+        try:
+            audio_path = resolve_audio_path(args.db, track["path"])
+        except FileNotFoundError:
+            audio_path = None
+
+        picked = pick_anchor(
+            args.anchor, main_cue=get_main_cue(cue_data),
+            downbeats=downbeats, beats=beats,
+            samples_per_beat=samples_per_beat, sample_rate=sample_rate,
+            detect_first_downbeat=_ai_detector(audio_path))
+        anchor = picked["anchor"]
+        if anchor is None:
+            print(f"{prefix} SKIP {track['title']} — no usable bar-1 anchor "
+                  f"({picked['note'] or 'no main cue, AI result, or grid'})")
+            stats["skipped"] += 1
+            continue
+
         result = None
 
         if needs_analysis:
-            try:
-                audio_path = resolve_audio_path(args.db, track["path"])
-            except FileNotFoundError:
+            if audio_path is None:
                 print(f"{prefix} ERROR {track['title']} — audio file not found")
                 stats["errors"] += 1
                 continue
 
-            print(f"{prefix} Analyzing {track['title']}...", end="", flush=True)
+            print(f"{prefix} Analyzing {track['title']} "
+                  f"({_describe_anchor(picked, sample_rate)})...",
+                  end="", flush=True)
 
             try:
                 result = analyze_structure(str(audio_path), **analysis_params)
@@ -670,7 +679,8 @@ def cmd_batch(args):
             analysis_sr = result["sample_rate"]
             sr_scale = sample_rate / analysis_sr if analysis_sr != sample_rate else 1.0
         else:
-            print(f"{prefix} {track['title']} (anchor: {anchor_src})...",
+            print(f"{prefix} {track['title']} "
+                  f"({_describe_anchor(picked, sample_rate)})...",
                   end="", flush=True)
 
         proposed = []
@@ -686,7 +696,7 @@ def cmd_batch(args):
                                      DEFAULT_CUE_COLORS.get(slot, "yellow"))
             is_optional = cue_def.get("optional", False)
 
-            bar_result = _resolve_bar_position(
+            bar_result = resolve_bar_position(
                 detect_key, anchor, samples_per_beat, beats,
                 beat_offset=args.beat_offset)
             if bar_result is not None:
@@ -749,6 +759,8 @@ def cmd_batch(args):
             stats["cues_written"] += len(proposed)
 
         stats["processed"] += 1
+        stats["anchors"][picked["source"]] = (
+            stats["anchors"].get(picked["source"], 0) + 1)
 
     # Summary
     print(f"\n{'='*50}")
@@ -758,6 +770,9 @@ def cmd_batch(args):
         print(f"Cues written: {stats['cues_written']}")
         if backup_path:
             print(f"Backup: {backup_path}")
+    if stats["anchors"]:
+        print("Bar-1 anchors: " + ", ".join(
+            f"{k} {v}" for k, v in stats["anchors"].items()))
     if stats["low_confidence"]:
         print(f"\nLow-confidence tracks (review manually):")
         for t in stats["low_confidence"]:
@@ -826,6 +841,9 @@ def main():
                            help="Overwrite existing cues in matched slots")
     p_analyze.add_argument("--beat-offset", type=int, default=0,
                            help="Shift all bar cues by N beats (can be negative)")
+    p_analyze.add_argument("--anchor", choices=ANCHOR_MODES, default="auto",
+                           help="How to find bar 1: auto (main cue, then AI "
+                                "downbeat, then grid), main-cue, ai, or grid")
     p_analyze.set_defaults(func=cmd_analyze)
 
     p_lp = sub.add_parser("list-playlists", help="List Engine DJ playlists")
@@ -863,6 +881,10 @@ def main():
     p_batch.add_argument("--beat-offset", type=int, default=0,
                          help="Shift all bar cues by N beats to correct a "
                               "systematic grid phase error (can be negative)")
+    p_batch.add_argument("--anchor", choices=ANCHOR_MODES, default="auto",
+                         help="How to find bar 1: auto (main cue, then AI "
+                              "downbeat, then grid), main-cue, ai, or grid. "
+                              "'ai' needs: pip install autocue[beats]")
     p_batch.set_defaults(func=cmd_batch)
 
     args = parser.parse_args()
