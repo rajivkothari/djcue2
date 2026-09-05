@@ -20,6 +20,7 @@ analysis = [
 ]
 gui = [
     "flask>=3.0",
+    "mutagen>=1.47",
 ]
 beats = [
     "beat-this",
@@ -41,6 +42,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "autocue.templates" = ["*.yaml"]
+"autocue" = ["static/*.html", "static/vendor/*.js"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -2,6 +2,7 @@
 
 import json
 import mimetypes
+from datetime import datetime
 from pathlib import Path
 
 from flask import Flask, jsonify, request, send_file, send_from_directory
@@ -399,7 +400,316 @@ def api_finalize():
     })
 
 
-def run_server(db_path: str, host: str = "127.0.0.1", port: int = 5555):
+# ---------------------------------------------------------------------------
+# Cue editor: library browser, bar-1 placement, generate, multi-target save
+# ---------------------------------------------------------------------------
+
+_vdj_db_path: str | None = None
+_RGB_TO_NAME = {(r, g, b): name for name, (a, r, g, b) in ENGINE_COLORS.items()}
+
+
+def _get_track(track_id):
+    conn = _conn()
+    try:
+        from autocue.db import list_tracks
+        tracks = list_tracks(conn, search=str(track_id))
+    finally:
+        conn.close()
+    return tracks[0] if tracks else None
+
+
+def _audio_path_or_none(track):
+    if not track["path"]:
+        return None
+    try:
+        return resolve_audio_path(_db_path, track["path"])
+    except FileNotFoundError:
+        return None
+
+
+def _backups_dir() -> Path:
+    d = Path(_db_path).parent / "autocue_backups"
+    d.mkdir(exist_ok=True)
+    return d
+
+
+@app.route("/editor")
+def editor():
+    return send_from_directory(app.static_folder, "editor.html")
+
+
+@app.route("/api/colors")
+def api_colors():
+    return jsonify(ENGINE_COLORS_HEX)
+
+
+@app.route("/api/library")
+def api_library():
+    q = request.args.get("q", "").strip() or None
+    limit = int(request.args.get("limit", 300))
+    conn = _conn()
+    try:
+        from autocue.db import list_tracks
+        tracks = list_tracks(conn, search=q, limit=limit)
+    finally:
+        conn.close()
+
+    out = []
+    for t in tracks:
+        has_cues = False
+        if t["quick_cues_blob"]:
+            try:
+                cd = decode_quick_cues(t["quick_cues_blob"])
+                has_cues = any(is_cue_active(c) for c in cd["cues"])
+            except Exception:
+                pass
+        duration = None
+        if t["beat_data_blob"]:
+            try:
+                bd = decode_beat_data(t["beat_data_blob"])
+                if bd["sample_rate"] > 0:
+                    duration = bd["total_samples"] / bd["sample_rate"]
+            except Exception:
+                pass
+        out.append({"id": t["id"], "title": t["title"], "artist": t["artist"],
+                    "bpm": t["bpm"], "has_cues": has_cues, "duration": duration})
+    return jsonify(out)
+
+
+@app.route("/api/track/<int:track_id>")
+def api_track(track_id):
+    track = _get_track(track_id)
+    if track is None:
+        return jsonify({"error": "Track not found"}), 404
+
+    sample_rate = get_sample_rate(track)
+    beats, downbeats, spb, duration = [], [], None, None
+    if track["beat_data_blob"]:
+        bd = decode_beat_data(track["beat_data_blob"])
+        beats = get_beat_positions(bd)
+        downbeats = get_downbeat_positions(bd)
+        spb = get_samples_per_beat(bd)
+        if bd["sample_rate"] > 0:
+            duration = bd["total_samples"] / bd["sample_rate"]
+
+    cues, main_cue = [], None
+    if track["quick_cues_blob"]:
+        cd = decode_quick_cues(track["quick_cues_blob"])
+        main_cue = get_main_cue(cd)
+        for c in cd["cues"]:
+            if not is_cue_active(c):
+                continue
+            rgb = (c["color_r"], c["color_g"], c["color_b"])
+            cues.append({
+                "slot": c["index"] + 1,
+                "label": c["label"],
+                "color_name": _RGB_TO_NAME.get(rgb),
+                "color_hex": f"#{rgb[0]:02x}{rgb[1]:02x}{rgb[2]:02x}",
+                "time_seconds": c["position_samples"] / sample_rate,
+            })
+
+    audio_path = _audio_path_or_none(track)
+    ext = audio_path.suffix.lower() if audio_path else None
+    from autocue.exporters import serato, vdj
+    return jsonify({
+        "id": track["id"], "title": track["title"], "artist": track["artist"],
+        "bpm": track["bpm"], "sample_rate": sample_rate, "duration": duration,
+        "beats": [b / sample_rate for b in beats],
+        "downbeats": [d / sample_rate for d in downbeats],
+        "seconds_per_beat": (spb / sample_rate) if spb else None,
+        "main_cue_seconds": (main_cue / sample_rate) if main_cue is not None else None,
+        "grid_first_downbeat_seconds": (downbeats[0] / sample_rate) if downbeats else None,
+        "cues": cues,
+        "has_quick_cues": track["quick_cues_blob"] is not None,
+        "audio_available": audio_path is not None,
+        "audio_path": str(audio_path) if audio_path else None,
+        "serato_supported": bool(ext) and ext in (serato.MP3_LIKE | serato.MP4_LIKE | serato.FLAC_LIKE),
+        "vdj_available": (_vdj_db_path or vdj.find_database()) is not None,
+    })
+
+
+@app.route("/api/track/<int:track_id>/ai_downbeat")
+def api_ai_downbeat(track_id):
+    track = _get_track(track_id)
+    if track is None:
+        return jsonify({"error": "Track not found"}), 404
+    audio_path = _audio_path_or_none(track)
+    if audio_path is None:
+        return jsonify({"error": "Audio file not found"}), 404
+    try:
+        from autocue.beats import detect_first_downbeat
+        secs = detect_first_downbeat(str(audio_path))
+    except ImportError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"error": f"AI detection failed: {e}"}), 500
+    if secs is None:
+        return jsonify({"error": "No downbeat detected"}), 404
+    return jsonify({"seconds": secs})
+
+
+@app.route("/api/generate", methods=["POST"])
+def api_generate():
+    data = request.json
+    track = _get_track(data.get("track_id"))
+    if track is None:
+        return jsonify({"error": "Track not found"}), 404
+    anchor_seconds = data.get("anchor_seconds")
+    if anchor_seconds is None:
+        return jsonify({"error": "Set bar 1 first"}), 400
+    template = load_template(data.get("template", "edm"))
+
+    sample_rate = get_sample_rate(track)
+    beats, spb, total = [], None, None
+    if track["beat_data_blob"]:
+        bd = decode_beat_data(track["beat_data_blob"])
+        beats = get_beat_positions(bd)
+        spb = get_samples_per_beat(bd)
+        total = bd["total_samples"]
+    if spb is None:
+        return jsonify({"error": "Track has no beat grid in Engine DJ"}), 400
+
+    anchor = float(anchor_seconds) * sample_rate
+    proposed, unsupported, beyond_end = [], [], []
+    for slot_key, cue_def in sorted(template["cues"].items(), key=lambda x: int(x[0])):
+        slot = int(slot_key)
+        detect_key = cue_def["detect"]
+        res = resolve_bar_position(detect_key, anchor, spb, beats)
+        if res is None:
+            unsupported.append(f"cue {slot} ({detect_key})")
+            continue
+        pos, _ = res
+        if pos is None:
+            continue
+        if total and pos >= total:
+            beyond_end.append(slot)
+            continue
+        color_name = cue_def.get("color", DEFAULT_CUE_COLORS.get(slot, "yellow"))
+        t = pos / sample_rate
+        proposed.append({"slot": slot, "label": cue_def.get("label", ""),
+                         "color_name": color_name,
+                         "color_hex": ENGINE_COLORS_HEX[color_name],
+                         "time_seconds": t, "time_display": format_time(t)})
+    return jsonify({"proposed": proposed, "unsupported": unsupported,
+                    "beyond_end": beyond_end})
+
+
+@app.route("/favicon.ico")
+def favicon():
+    return "", 204
+
+
+@app.route("/api/save", methods=["POST"])
+def api_save():
+    data = request.json
+    track = _get_track(data.get("track_id"))
+    if track is None:
+        return jsonify({"error": "Track not found"}), 404
+    cues = data.get("cues", [])
+    targets = data.get("targets", {})
+    clear_missing = bool(data.get("clear_missing", True))
+    results = {}
+
+    for c in cues:
+        if not 1 <= int(c["slot"]) <= 8:
+            return jsonify({"error": f"Bad slot {c['slot']}"}), 400
+        if c.get("color_name", "yellow").lower() not in ENGINE_COLORS:
+            return jsonify({"error": f"Unknown color {c.get('color_name')}"}), 400
+
+    sample_rate = get_sample_rate(track)
+    audio_path = _audio_path_or_none(track)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    # --- Engine DJ -----------------------------------------------------
+    if targets.get("engine"):
+        if is_engine_dj_running():
+            results["engine"] = {"ok": False, "message": "Engine DJ is running. Close it first."}
+        elif not track["quick_cues_blob"]:
+            results["engine"] = {"ok": False, "message": "Track has no quickCues blob (analyze it in Engine DJ first)"}
+        else:
+            cue_data = decode_quick_cues(track["quick_cues_blob"])
+            by_slot = {int(c["slot"]): c for c in cues}
+            for idx in range(len(cue_data["cues"])):
+                slot = idx + 1
+                if slot in by_slot:
+                    c = by_slot[slot]
+                    a, r, g, b = ENGINE_COLORS[c.get("color_name", "yellow").lower()]
+                    cue_data["cues"][idx] = {
+                        "index": idx, "label": c.get("label", ""),
+                        "position_samples": float(c["time_seconds"]) * sample_rate,
+                        "color_a": a, "color_r": r, "color_g": g, "color_b": b,
+                    }
+                elif clear_missing:
+                    cue_data["cues"][idx] = {
+                        "index": idx, "label": "",
+                        "position_samples": CUE_POSITION_EMPTY,
+                        "color_a": 0, "color_r": 0, "color_g": 0, "color_b": 0,
+                    }
+            backup = backup_library(_db_path)
+            wdb = _conn(readonly=False)
+            try:
+                write_quick_cues(wdb, track["id"], encode_quick_cues(cue_data))
+            finally:
+                wdb.close()
+            results["engine"] = {"ok": True, "message": f"Wrote {len(cues)} cues",
+                                 "backup": str(backup)}
+
+    # --- Serato tags in the audio file (also read by djay Pro) ----------
+    if targets.get("serato"):
+        if audio_path is None:
+            results["serato"] = {"ok": False, "message": "Audio file not found"}
+        else:
+            try:
+                from autocue.exporters import serato
+                scues = []
+                for c in cues:
+                    a, r, g, b = ENGINE_COLORS[c.get("color_name", "yellow").lower()]
+                    scues.append(serato.SeratoCue(
+                        index=int(c["slot"]) - 1,
+                        position_ms=int(round(float(c["time_seconds"]) * 1000)),
+                        color=(r, g, b), name=c.get("label", "")))
+                previous = serato.write_cues(audio_path, scues)
+                msg = f"Wrote {len(scues)} cues to {audio_path.name}"
+                res = {"ok": True, "message": msg}
+                if previous is not None:
+                    bpath = _backups_dir() / f"serato_{track['id']}_{stamp}.bin"
+                    bpath.write_bytes(previous)
+                    res["backup"] = str(bpath)
+                results["serato"] = res
+            except Exception as e:
+                results["serato"] = {"ok": False, "message": str(e)}
+
+    # --- VirtualDJ database.xml ------------------------------------------
+    if targets.get("vdj"):
+        from autocue.exporters import vdj
+        db = _vdj_db_path or vdj.find_database()
+        if db is None:
+            results["vdj"] = {"ok": False, "message": "VirtualDJ database.xml not found"}
+        elif audio_path is None:
+            results["vdj"] = {"ok": False, "message": "Audio file not found"}
+        elif vdj.is_virtualdj_running():
+            results["vdj"] = {"ok": False, "message": "VirtualDJ is running. Close it first."}
+        else:
+            try:
+                vcues = []
+                for c in cues:
+                    a, r, g, b = ENGINE_COLORS[c.get("color_name", "yellow").lower()]
+                    vcues.append({"num": int(c["slot"]), "seconds": float(c["time_seconds"]),
+                                  "name": c.get("label", ""), "color": (r, g, b)})
+                res = vdj.write_cues(db, str(audio_path), vcues)
+                results["vdj"] = {"ok": True, "backup": res["backup"],
+                                  "message": f"Wrote {res['written']} cues"
+                                             + (" (new entry)" if res["created_song"] else "")}
+            except Exception as e:
+                results["vdj"] = {"ok": False, "message": str(e)}
+
+    return jsonify({"results": results})
+
+
+def run_server(db_path: str, host: str = "127.0.0.1", port: int = 5555,
+               vdj_db: str | None = None):
+    global _vdj_db_path
+    _vdj_db_path = vdj_db
     set_db_path(db_path)
     conn = _conn()
     try:
@@ -407,5 +717,6 @@ def run_server(db_path: str, host: str = "127.0.0.1", port: int = 5555):
         print(f"Schema: {version}")
     finally:
         conn.close()
-    print(f"Starting at http://{host}:{port}")
+    print(f"Review workflow: http://{host}:{port}")
+    print(f"Cue editor:      http://{host}:{port}/editor")
     app.run(host=host, port=port, debug=False)

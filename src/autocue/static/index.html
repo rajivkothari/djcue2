@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Engine DJ Auto-Cue</title>
-<script src="https://unpkg.com/wavesurfer.js@7"></script>
+<script src="/static/vendor/wavesurfer.min.js"></script>
 <style>
   :root {
     --bg: #1a1a2e;
@@ -282,6 +282,7 @@
     <select id="template-select"></select>
     <button id="load-btn" onclick="loadTracks()">Load</button>
   </div>
+  <a href="/editor" style="color:var(--fg2); font-size:13px; margin-left:auto; margin-right:12px;">Cue editor &rarr;</a>
   <span id="schema-badge"></span>
 </header>
 

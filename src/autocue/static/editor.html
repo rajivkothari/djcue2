@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Auto-Cue Editor</title>
+<script src="/static/vendor/wavesurfer.min.js"></script>
+<script src="/static/vendor/regions.min.js"></script>
+<style>
+  :root {
+    --bg: #1a1a2e; --bg2: #16213e; --bg3: #0f3460;
+    --fg: #e0e0e0; --fg2: #a0a0a0;
+    --accent: #e94560; --success: #4ecca3; --warning: #f5a623; --border: #2a2a4a;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg); color: var(--fg); height: 100vh; display: flex; flex-direction: column; }
+  header { background: var(--bg2); padding: 10px 20px; display: flex; align-items: center; gap: 16px; border-bottom: 1px solid var(--border); }
+  header h1 { font-size: 18px; font-weight: 600; white-space: nowrap; }
+  header a { color: var(--fg2); font-size: 13px; text-decoration: none; }
+  header a:hover { color: var(--fg); }
+  .badge { margin-left: auto; font-size: 11px; color: var(--fg2); background: var(--bg3); padding: 3px 8px; border-radius: 10px; }
+
+  .main { display: flex; flex: 1; overflow: hidden; }
+  .sidebar { width: 340px; background: var(--bg2); border-right: 1px solid var(--border); display: flex; flex-direction: column; }
+  .sidebar input { margin: 10px; padding: 8px 10px; background: var(--bg3); color: var(--fg); border: 1px solid var(--border); border-radius: 4px; font-size: 13px; }
+  .track-list { flex: 1; overflow-y: auto; }
+  .track-item { padding: 8px 12px; border-bottom: 1px solid var(--border); cursor: pointer; display: flex; gap: 8px; align-items: center; font-size: 13px; }
+  .track-item:hover { background: var(--bg3); }
+  .track-item.active { background: var(--bg3); border-left: 3px solid var(--accent); }
+  .track-item .t { flex: 1; overflow: hidden; }
+  .track-item .title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .track-item .artist { color: var(--fg2); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .track-item .meta { color: var(--fg2); font-size: 11px; text-align: right; white-space: nowrap; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--border); flex-shrink: 0; }
+  .dot.has { background: var(--success); }
+  .count { padding: 6px 12px; color: var(--fg2); font-size: 12px; border-top: 1px solid var(--border); }
+
+  .content { flex: 1; overflow-y: auto; padding: 16px 20px; }
+  .empty { height: 100%; display: flex; align-items: center; justify-content: center; color: var(--fg2); text-align: center; line-height: 1.8; }
+  .track-info h2 { font-size: 18px; font-weight: 600; }
+  .track-info .meta { color: var(--fg2); font-size: 13px; }
+
+  #wave-wrap { background: var(--bg2); border: 1px solid var(--border); border-radius: 6px; padding: 8px; margin: 12px 0 8px; position: relative; }
+  #wave-wrap.set-mode { outline: 2px dashed var(--warning); cursor: crosshair; }
+  #waveform ::part(region), #waveform ::part(marker) { border-left: 2px solid; }
+  #waveform ::part(marker) { width: 3px !important; cursor: ew-resize; }
+  #waveform ::part(region-content), #waveform ::part(marker-content) { font-size: 10px; font-weight: 700; padding: 1px 4px; border-radius: 2px; color: #000; margin-top: 2px; white-space: nowrap; }
+  .transport { display: flex; gap: 8px; align-items: center; margin-top: 8px; flex-wrap: wrap; font-size: 13px; color: var(--fg2); }
+  .transport input[type=range] { width: 160px; accent-color: var(--accent); }
+
+  .panel { background: var(--bg2); border: 1px solid var(--border); border-radius: 6px; padding: 12px; margin-bottom: 12px; }
+  .panel h3 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--fg2); margin-bottom: 8px; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .btn { background: var(--bg3); color: var(--fg); border: 1px solid var(--border); padding: 6px 12px; border-radius: 4px; font-size: 13px; cursor: pointer; }
+  .btn:hover { border-color: var(--fg2); }
+  .btn:disabled { opacity: .45; cursor: default; }
+  .btn.primary { background: var(--accent); border-color: var(--accent); font-weight: 600; }
+  .btn.success { background: var(--success); border-color: var(--success); color: #000; font-weight: 600; }
+  .btn.on { background: var(--warning); border-color: var(--warning); color: #000; }
+  .btn.sm { padding: 3px 8px; font-size: 12px; }
+  .anchor-time { font-size: 22px; font-variant-numeric: tabular-nums; font-weight: 600; min-width: 120px; }
+  .hint { color: var(--fg2); font-size: 12px; }
+  select, input[type=number], input[type=text] { background: var(--bg3); color: var(--fg); border: 1px solid var(--border); border-radius: 4px; padding: 5px 8px; font-size: 13px; }
+  label.chk { display: flex; align-items: center; gap: 6px; font-size: 13px; }
+  label.chk input { accent-color: var(--accent); }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; color: var(--fg2); font-weight: 500; padding: 6px 8px; border-bottom: 1px solid var(--border); font-size: 12px; }
+  td { padding: 5px 8px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+  td input[type=text] { width: 140px; }
+  td input[type=number] { width: 110px; font-variant-numeric: tabular-nums; }
+  .swatch { display: inline-block; width: 12px; height: 12px; border-radius: 2px; margin-right: 6px; vertical-align: -2px; }
+  .play { background: none; border: 1px solid var(--border); color: var(--accent); border-radius: 50%; width: 26px; height: 26px; cursor: pointer; font-size: 11px; }
+  .x { background: none; border: none; color: var(--fg2); cursor: pointer; font-size: 16px; }
+  .x:hover { color: var(--accent); }
+
+  .status { min-height: 22px; font-size: 13px; color: var(--fg2); margin: 6px 0; }
+  .ok { color: var(--success); } .warn { color: var(--warning); } .err { color: var(--accent); }
+  .results { font-size: 13px; line-height: 1.7; }
+  .spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid var(--fg2); border-top-color: transparent; border-radius: 50%; animation: spin .8s linear infinite; vertical-align: -2px; margin-right: 6px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  kbd { background: var(--bg3); border: 1px solid var(--border); border-radius: 3px; padding: 0 5px; font-size: 11px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Cue Editor</h1>
+  <a href="/">&larr; Playlist review</a>
+  <span class="badge" id="schema-badge"></span>
+</header>
+
+<div class="main">
+  <div class="sidebar">
+    <input id="search" type="text" placeholder="Search library (title or artist)…" autocomplete="off">
+    <div class="track-list" id="track-list"></div>
+    <div class="count" id="count"></div>
+  </div>
+
+  <div class="content" id="content">
+    <div class="empty" id="empty">Pick a track from your library to begin.<br><span class="hint">Green dot = already has hot cues in Engine DJ.</span></div>
+
+    <div id="editor" style="display:none;">
+      <div class="track-info">
+        <h2 id="t-title"></h2>
+        <div class="meta" id="t-meta"></div>
+      </div>
+
+      <div id="wave-wrap"><div id="waveform"></div></div>
+      <div class="transport">
+        <button class="btn sm" id="play-btn" onclick="togglePlay()">&#9654; Play</button>
+        <span id="clock">0:00.000</span>
+        <span>Zoom</span><input type="range" id="zoom" min="10" max="400" value="40" oninput="ws && ws.zoom(+this.value)">
+        <span class="hint">Drag any marker to move it. <kbd>Space</kbd> play/pause · <kbd>B</kbd> set bar 1 at playhead</span>
+      </div>
+
+      <div class="panel">
+        <h3>Step 1 — Bar 1 (first beat)</h3>
+        <div class="row">
+          <span class="anchor-time" id="anchor-time">—</span>
+          <button class="btn" onclick="setAnchor(ws.getCurrentTime())" title="Use the current playhead position">Set at playhead</button>
+          <button class="btn" id="set-mode-btn" onclick="toggleSetMode()" title="Then click anywhere on the waveform">Click to set</button>
+          <span style="width:12px"></span>
+          <button class="btn" id="btn-main" onclick="useCandidate('main')">Main cue</button>
+          <button class="btn" id="btn-grid" onclick="useCandidate('grid')">Engine grid</button>
+          <button class="btn" id="btn-ai" onclick="detectAI()">AI detect</button>
+          <span style="width:12px"></span>
+          <button class="btn sm" onclick="nudge(-4)" title="one bar earlier">&laquo; bar</button>
+          <button class="btn sm" onclick="nudge(-1)" title="one beat earlier">&lsaquo; beat</button>
+          <button class="btn sm" onclick="nudge(1)" title="one beat later">beat &rsaquo;</button>
+          <button class="btn sm" onclick="nudge(4)" title="one bar later">bar &raquo;</button>
+          <button class="btn sm" onclick="previewAt(anchor)" title="play 8 seconds from bar 1">&#9654; from bar 1</button>
+          <label class="chk" style="margin-left:auto"><input type="checkbox" id="snap" checked> Snap to Engine grid beats</label>
+        </div>
+        <div class="status" id="anchor-status"></div>
+      </div>
+
+      <div class="panel">
+        <h3>Step 2 — Generate the rest</h3>
+        <div class="row">
+          <select id="template"></select>
+          <button class="btn primary" id="gen-btn" onclick="generate()">Generate cues from bar 1</button>
+          <button class="btn" onclick="reloadExisting()" title="Discard edits and show the cues currently in Engine DJ">Reload existing</button>
+          <button class="btn" onclick="addCueAtPlayhead()">+ Add cue at playhead</button>
+        </div>
+        <div class="status" id="gen-status"></div>
+        <table>
+          <thead><tr><th></th><th>Slot</th><th>Label</th><th>Time (s)</th><th>Color</th><th></th></tr></thead>
+          <tbody id="cue-rows"></tbody>
+        </table>
+      </div>
+
+      <div class="panel">
+        <h3>Step 3 — Save to</h3>
+        <div class="row">
+          <label class="chk"><input type="checkbox" id="tgt-engine" checked> Engine DJ <span class="hint">(library database)</span></label>
+          <label class="chk"><input type="checkbox" id="tgt-serato" checked> Serato <span class="hint">(tags in the audio file · also imported by djay Pro)</span></label>
+          <label class="chk"><input type="checkbox" id="tgt-vdj"> VirtualDJ <span class="hint" id="vdj-hint">(database.xml)</span></label>
+          <button class="btn success" id="save-btn" onclick="save()" style="margin-left:auto">Save cues</button>
+        </div>
+        <div class="results" id="save-results"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+let ws = null, regions = null, track = null, cues = [], anchor = null;
+let colors = {}, setMode = false, previewTimer = null, libraryTimer = null;
+let ai = { seconds: null };
+
+const $ = id => document.getElementById(id);
+const esc = s => { const d = document.createElement('div'); d.textContent = s ?? ''; return d.innerHTML; };
+const fmt = t => { if (t == null || isNaN(t)) return '—'; const m = Math.floor(t / 60), s = t - m * 60; return `${m}:${s.toFixed(3).padStart(6, '0')}`; };
+const snapOn = () => $('snap').checked;
+
+function nearestBeat(t) {
+  if (!track || !track.beats.length) return t;
+  let best = track.beats[0], d = Math.abs(t - best);
+  for (const b of track.beats) { const dd = Math.abs(t - b); if (dd < d) { d = dd; best = b; } }
+  return best;
+}
+const maybeSnap = t => snapOn() ? nearestBeat(t) : t;
+
+// ---------------------------------------------------------------- library
+async function init() {
+  try {
+    const s = await (await fetch('/api/schema')).json();
+    $('schema-badge').textContent = `Schema ${s.version || s.error}`;
+    colors = await (await fetch('/api/colors')).json();
+    const templates = await (await fetch('/api/templates')).json();
+    for (const t of templates) { const o = document.createElement('option'); o.value = t.id; o.textContent = t.name; $('template').appendChild(o); }
+  } catch (e) { $('schema-badge').textContent = 'Connection error'; }
+  loadLibrary('');
+  $('search').addEventListener('input', e => { clearTimeout(libraryTimer); libraryTimer = setTimeout(() => loadLibrary(e.target.value), 250); });
+  document.addEventListener('keydown', e => {
+    if (['INPUT', 'SELECT', 'TEXTAREA'].includes(e.target.tagName)) return;
+    if (e.code === 'Space') { e.preventDefault(); togglePlay(); }
+    if (e.key === 'b' || e.key === 'B') { if (ws) setAnchor(ws.getCurrentTime()); }
+  });
+}
+
+async function loadLibrary(q) {
+  const list = await (await fetch(`/api/library?q=${encodeURIComponent(q)}&limit=300`)).json();
+  const el = $('track-list'); el.innerHTML = '';
+  for (const t of list) {
+    const div = document.createElement('div');
+    div.className = 'track-item' + (track && track.id === t.id ? ' active' : '');
+    div.dataset.id = t.id;
+    div.innerHTML = `<span class="dot ${t.has_cues ? 'has' : ''}"></span>
+      <div class="t"><div class="title">${esc(t.title)}</div><div class="artist">${esc(t.artist)}</div></div>
+      <div class="meta">${t.bpm ? Math.round(t.bpm) + ' bpm' : ''}<br>${t.duration ? fmt(t.duration).split('.')[0] : ''}</div>`;
+    div.onclick = () => selectTrack(t.id);
+    el.appendChild(div);
+  }
+  $('count').textContent = `${list.length} tracks${list.length >= 300 ? ' (showing first 300 — refine search)' : ''}`;
+}
+
+// ---------------------------------------------------------------- track
+async function selectTrack(id) {
+  const r = await fetch(`/api/track/${id}`);
+  const data = await r.json();
+  if (data.error) { alert(data.error); return; }
+  track = data; ai = { seconds: null };
+  document.querySelectorAll('.track-item').forEach(el => el.classList.toggle('active', +el.dataset.id === id));
+  $('empty').style.display = 'none'; $('editor').style.display = 'block';
+  $('t-title').textContent = track.title;
+  $('t-meta').textContent = `${track.artist} · ${track.bpm ? track.bpm.toFixed(1) + ' BPM' : 'no BPM'} · ${track.beats.length} grid beats · ${track.audio_path || 'audio file not found'}`;
+  $('save-results').innerHTML = ''; $('gen-status').textContent = '';
+  $('btn-main').disabled = track.main_cue_seconds == null;
+  $('btn-grid').disabled = track.grid_first_downbeat_seconds == null;
+  $('tgt-serato').disabled = !track.serato_supported; if (!track.serato_supported) $('tgt-serato').checked = false;
+  $('tgt-vdj').disabled = !track.vdj_available;
+  $('vdj-hint').textContent = track.vdj_available ? '(database.xml found)' : '(database.xml not found)';
+  $('tgt-engine').disabled = !track.has_quick_cues;
+
+  cues = track.cues.map(c => ({ slot: c.slot, label: c.label, color_name: c.color_name || 'yellow', time: c.time_seconds }));
+  anchor = track.main_cue_seconds ?? track.grid_first_downbeat_seconds ?? null;
+  $('anchor-status').innerHTML = anchor == null ? '<span class="warn">No main cue or grid — set bar 1 manually.</span>'
+    : `Starting from ${track.main_cue_seconds != null ? '<b>main cue</b>' : '<b>Engine grid</b>'}. Check it against the audio, then generate.`;
+
+  renderTable(); updateAnchorUI();
+  try { loadWaveform(); }
+  catch (e) { $('anchor-status').innerHTML = `<span class="err">Waveform unavailable: ${esc(String(e))}. You can still edit times in the table.</span>`; }
+}
+
+function loadWaveform() {
+  if (ws) { ws.destroy(); ws = null; }
+  ws = WaveSurfer.create({
+    container: '#waveform', waveColor: '#4a4a6a', progressColor: '#e94560', cursorColor: '#ffffff88',
+    height: 120, barWidth: 2, barGap: 1, barRadius: 2, normalize: true, minPxPerSec: +$('zoom').value,
+    url: `/api/audio/${track.id}`,
+  });
+  regions = ws.registerPlugin(WaveSurfer.Regions.create());
+  ws.on('ready', () => { renderMarkers(); });
+  ws.on('timeupdate', t => { $('clock').textContent = fmt(t); });
+  ws.on('play', () => $('play-btn').innerHTML = '&#10074;&#10074; Pause');
+  ws.on('pause', () => $('play-btn').innerHTML = '&#9654; Play');
+  ws.on('interaction', t => { if (setMode) { setAnchor(t); toggleSetMode(false); } });
+  ws.on('error', e => { $('anchor-status').innerHTML = `<span class="err">Audio load error: ${esc(String(e))}</span>`; });
+  regions.on('region-updated', region => {
+    if (region.id === 'anchor') { anchor = maybeSnap(region.start); if (anchor !== region.start) region.setOptions({ start: anchor }); updateAnchorUI(); return; }
+    const slot = +region.id.replace('cue-', '');
+    const c = cues.find(c => c.slot === slot); if (!c) return;
+    c.time = maybeSnap(region.start); if (c.time !== region.start) region.setOptions({ start: c.time });
+    renderTable();
+  });
+  regions.on('region-clicked', (region, e) => { e.stopPropagation(); previewAt(region.start); });
+}
+
+function renderMarkers() {
+  if (!regions) return;
+  regions.clearRegions();
+  if (anchor != null) {
+    // Cue 1 normally sits exactly on bar 1, so pin this flag to the bottom
+    // edge to keep both labels readable.
+    const flag = document.createElement('span');
+    flag.textContent = 'BAR 1';
+    flag.style.cssText = 'position:absolute;bottom:2px;left:2px;font:700 10px sans-serif;background:#fff;color:#000;padding:1px 4px;border-radius:2px;white-space:nowrap;';
+    regions.addRegion({ id: 'anchor', start: anchor, content: flag, color: '#ffffff', drag: true, resize: false });
+  }
+  for (const c of cues) {
+    regions.addRegion({ id: `cue-${c.slot}`, start: c.time, content: `${c.slot} ${c.label || ''}`.trim(),
+      color: colors[c.color_name] || '#ffffff', drag: true, resize: false });
+  }
+}
+
+// ---------------------------------------------------------------- bar 1
+function setAnchor(t) {
+  if (t == null) return;
+  anchor = Math.max(0, maybeSnap(t));
+  renderMarkers(); updateAnchorUI();
+  $('anchor-status').innerHTML = 'Bar 1 set. Listen with <b>&#9654; from bar 1</b>, nudge if needed, then generate.';
+}
+function updateAnchorUI() { $('anchor-time').textContent = fmt(anchor); $('gen-btn').disabled = anchor == null; }
+function toggleSetMode(force) {
+  setMode = force === undefined ? !setMode : force;
+  $('set-mode-btn').classList.toggle('on', setMode);
+  $('wave-wrap').classList.toggle('set-mode', setMode);
+  if (setMode) $('anchor-status').textContent = 'Click on the waveform where the first beat is…';
+}
+function useCandidate(which) {
+  if (which === 'main') setAnchor(track.main_cue_seconds);
+  if (which === 'grid') setAnchor(track.grid_first_downbeat_seconds);
+  if (which === 'ai') setAnchor(ai.seconds);
+}
+function nudge(beats) {
+  if (anchor == null || !track.seconds_per_beat) return;
+  const was = snapOn(); $('snap').checked = false;
+  anchor = Math.max(0, anchor + beats * track.seconds_per_beat);
+  $('snap').checked = was; if (was) anchor = nearestBeat(anchor);
+  renderMarkers(); updateAnchorUI();
+}
+async function detectAI() {
+  $('btn-ai').disabled = true;
+  $('anchor-status').innerHTML = '<span class="spinner"></span>Running Beat This! on the audio (about 10 s)…';
+  try {
+    const r = await (await fetch(`/api/track/${track.id}/ai_downbeat`)).json();
+    if (r.error) { $('anchor-status').innerHTML = `<span class="err">${esc(r.error)}</span>`; return; }
+    ai.seconds = r.seconds;
+    const parts = [`AI says the first downbeat is at <b>${fmt(r.seconds)}</b>`];
+    if (track.main_cue_seconds != null && track.seconds_per_beat) {
+      const gap = (r.seconds - track.main_cue_seconds) / track.seconds_per_beat;
+      parts.push(Math.abs(gap) < 0.5 ? '<span class="ok">— agrees with your main cue.</span>'
+        : `<span class="warn">— ${Math.abs(gap).toFixed(1)} beats ${gap > 0 ? 'after' : 'before'} your main cue.</span>`);
+    }
+    parts.push(`<button class="btn sm" onclick="useCandidate('ai')">Use it</button>`);
+    $('anchor-status').innerHTML = parts.join(' ');
+  } catch (e) { $('anchor-status').innerHTML = `<span class="err">${esc(String(e))}</span>`; }
+  finally { $('btn-ai').disabled = false; }
+}
+
+// ---------------------------------------------------------------- cues
+async function generate() {
+  if (anchor == null) return;
+  $('gen-status').innerHTML = '<span class="spinner"></span>Generating…';
+  const r = await (await fetch('/api/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ track_id: track.id, template: $('template').value, anchor_seconds: anchor }) })).json();
+  if (r.error) { $('gen-status').innerHTML = `<span class="err">${esc(r.error)}</span>`; return; }
+  cues = r.proposed.map(p => ({ slot: p.slot, label: p.label, color_name: p.color_name, time: p.time_seconds }));
+  const dropped = r.unsupported.length ? ` <span class="warn">Skipped analysis-based ${esc(r.unsupported.join(', '))} — this editor is bar-based.</span>` : '';
+  const beyond = r.beyond_end && r.beyond_end.length ? ` <span class="warn">Cue${r.beyond_end.length > 1 ? 's' : ''} ${r.beyond_end.join(', ')} would fall past the end of the track — skipped.</span>` : '';
+  $('gen-status').innerHTML = `<span class="ok">${cues.length} cues placed from bar 1.</span> Drag markers or edit times, then save.${dropped}${beyond}`;
+  renderTable(); renderMarkers();
+}
+function reloadExisting() {
+  cues = track.cues.map(c => ({ slot: c.slot, label: c.label, color_name: c.color_name || 'yellow', time: c.time_seconds }));
+  $('gen-status').textContent = `Showing the ${cues.length} cues currently in Engine DJ.`;
+  renderTable(); renderMarkers();
+}
+function addCueAtPlayhead() {
+  const used = new Set(cues.map(c => c.slot));
+  const slot = [1,2,3,4,5,6,7,8].find(s => !used.has(s));
+  if (!slot) { $('gen-status').innerHTML = '<span class="warn">All 8 slots are used.</span>'; return; }
+  const names = Object.keys(colors);
+  cues.push({ slot, label: '', color_name: names[(slot - 1) % names.length], time: maybeSnap(ws ? ws.getCurrentTime() : 0) });
+  cues.sort((a, b) => a.slot - b.slot);
+  renderTable(); renderMarkers();
+}
+function renderTable() {
+  const tb = $('cue-rows'); tb.innerHTML = '';
+  const names = Object.keys(colors);
+  for (const c of [...cues].sort((a, b) => a.slot - b.slot)) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td><button class="play" onclick="previewAt(${c.time})">&#9654;</button></td>
+      <td><b>${c.slot}</b></td>
+      <td><input type="text" value="${esc(c.label)}" maxlength="40" onchange="editCue(${c.slot},'label',this.value)"></td>
+      <td><input type="number" step="0.001" min="0" value="${c.time.toFixed(3)}" onchange="editCue(${c.slot},'time',parseFloat(this.value))"> <span class="hint">${fmt(c.time)}</span></td>
+      <td><span class="swatch" style="background:${colors[c.color_name] || '#fff'}"></span>
+          <select onchange="editCue(${c.slot},'color_name',this.value)">${names.map(n => `<option ${n === c.color_name ? 'selected' : ''}>${n}</option>`).join('')}</select></td>
+      <td><button class="x" title="remove" onclick="removeCue(${c.slot})">&times;</button></td>`;
+    tb.appendChild(tr);
+  }
+  if (!cues.length) tb.innerHTML = '<tr><td colspan="6" class="hint">No cues yet — generate from bar 1 or add one at the playhead.</td></tr>';
+  $('save-btn').disabled = !cues.length;
+}
+function editCue(slot, field, value) {
+  const c = cues.find(c => c.slot === slot); if (!c) return;
+  if (field === 'time') { if (isNaN(value)) return; value = Math.max(0, maybeSnap(value)); }
+  c[field] = value; renderTable(); renderMarkers();
+}
+function removeCue(slot) { cues = cues.filter(c => c.slot !== slot); renderTable(); renderMarkers(); }
+
+// ---------------------------------------------------------------- transport
+function togglePlay() { if (ws) ws.playPause(); }
+function previewAt(t) {
+  if (!ws || t == null) return;
+  clearTimeout(previewTimer);
+  ws.setTime(t); ws.play();
+  previewTimer = setTimeout(() => ws.pause(), 8000);
+}
+
+// ---------------------------------------------------------------- save
+async function save() {
+  const targets = { engine: $('tgt-engine').checked, serato: $('tgt-serato').checked, vdj: $('tgt-vdj').checked };
+  if (!targets.engine && !targets.serato && !targets.vdj) { $('save-results').innerHTML = '<span class="warn">Pick at least one target.</span>'; return; }
+  $('save-btn').disabled = true;
+  $('save-results').innerHTML = '<span class="spinner"></span>Saving…';
+  try {
+    const r = await (await fetch('/api/save', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ track_id: track.id, targets, clear_missing: true,
+        cues: cues.map(c => ({ slot: c.slot, label: c.label, color_name: c.color_name, time_seconds: c.time })) }) })).json();
+    if (r.error) { $('save-results').innerHTML = `<span class="err">${esc(r.error)}</span>`; return; }
+    const names = { engine: 'Engine DJ', serato: 'Serato / djay Pro (file tags)', vdj: 'VirtualDJ' };
+    $('save-results').innerHTML = Object.entries(r.results).map(([k, v]) =>
+      `<div><span class="${v.ok ? 'ok' : 'err'}">${v.ok ? '&#10003;' : '&#10007;'}</span> <b>${names[k]}</b>: ${esc(v.message)}${v.backup ? ` <span class="hint">backup: ${esc(v.backup)}</span>` : ''}</div>`).join('')
+      + (targets.serato && r.results.serato?.ok ? '<div class="hint">djay Pro: re-import or re-analyze the track so it picks up the Serato cue tags.</div>' : '');
+    if (r.results.engine?.ok) { track.cues = cues.map(c => ({ slot: c.slot, label: c.label, color_name: c.color_name, color_hex: colors[c.color_name], time_seconds: c.time })); loadLibrary($('search').value); }
+  } catch (e) { $('save-results').innerHTML = `<span class="err">${esc(String(e))}</span>`; }
+  finally { $('save-btn').disabled = false; }
+}
+
+init();
+</script>
+</body>
+</html>

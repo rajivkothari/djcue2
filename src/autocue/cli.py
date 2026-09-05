@@ -523,7 +523,8 @@ def cmd_serve(args):
     except ImportError:
         print("ERROR: GUI requires Flask. Install with: pip install autocue[gui]")
         sys.exit(1)
-    run_server(args.db, host=args.host, port=args.port)
+    run_server(args.db, host=args.host, port=args.port,
+               vdj_db=getattr(args, "vdj_db", None))
 
 
 def cmd_batch(args):
@@ -626,11 +627,13 @@ def cmd_batch(args):
         downbeats = []
         beats = []
         samples_per_beat = None
+        total_samples = None
         if track["beat_data_blob"]:
             beat_data = decode_beat_data(track["beat_data_blob"])
             downbeats = get_downbeat_positions(beat_data)
             beats = get_beat_positions(beat_data)
             samples_per_beat = get_samples_per_beat(beat_data)
+            total_samples = beat_data["total_samples"]
 
         if not beats or samples_per_beat is None:
             print(f"{prefix} SKIP {track['title']} — no beat grid")
@@ -703,6 +706,9 @@ def cmd_batch(args):
                 position_samples, confidence = bar_result
                 if position_samples is None:
                     print(f" [cue {slot}: {detect_key} unresolved]", end="")
+                    continue
+                if total_samples and position_samples >= total_samples:
+                    print(f" [cue {slot}: {detect_key} past track end]", end="")
                     continue
             else:
                 if result is None:
@@ -858,6 +864,8 @@ def main():
     p_serve.add_argument("--db", default=argparse.SUPPRESS, help=_DB_HELP)
     p_serve.add_argument("--host", default="127.0.0.1", help="Host (default: 127.0.0.1)")
     p_serve.add_argument("--port", type=int, default=5555, help="Port (default: 5555)")
+    p_serve.add_argument("--vdj-db", default=None,
+                         help="Path to VirtualDJ database.xml (default: auto-detect)")
     p_serve.set_defaults(func=cmd_serve)
 
     p_batch = sub.add_parser("batch",
