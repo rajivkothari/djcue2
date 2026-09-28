@@ -195,6 +195,23 @@ def write_quick_cues(conn: sqlite3.Connection, track_id: int,
     conn.commit()
 
 
+def write_beat_data(conn: sqlite3.Connection, track_id: int,
+                    blob: bytes) -> None:
+    """Write a beatData blob for a track (replaces Engine's beat grid)."""
+    major, _, _ = get_schema_version(conn)
+    if major >= 3:
+        conn.execute(
+            "UPDATE PerformanceData SET beatData = ? WHERE trackId = ?",
+            (blob, track_id),
+        )
+    else:
+        conn.execute(
+            "UPDATE Track SET beatData = ? WHERE id = ?",
+            (blob, track_id),
+        )
+    conn.commit()
+
+
 def list_playlists(conn: sqlite3.Connection) -> list[dict]:
     """List all playlists with track counts."""
     rows = conn.execute("""

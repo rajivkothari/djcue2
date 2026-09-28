@@ -18,14 +18,66 @@ VALID_COLORS = {
 }
 
 
+PHRASE_PREFIX = "phrase-"
+DEFAULT_PHRASE_CUES = 6
+PHRASE_PRESETS = (8, 16, 32)
+
+_PHRASE_COLORS = ["yellow", "orange", "purple", "red",
+                  "green", "teal", "cyan", "blue"]
+
+
+def phrase_template(bars: int, count: int = DEFAULT_PHRASE_CUES) -> dict:
+    """A template that places cue k at bar 1 + (k-1)*bars.
+
+    "Phrase-match" cueing: cue 1 is the first bar and every later cue is
+    one phrase further on, so any two cues line up when mixing.
+    """
+    if bars < 1 or bars > 128:
+        raise ValueError("Phrase length must be 1–128 bars")
+    if count < 1 or count > 8:
+        raise ValueError("Cue count must be 1–8")
+    cues = {}
+    for k in range(1, count + 1):
+        bar = 1 + (k - 1) * bars
+        cues[k] = {"detect": f"bar_{bar}",
+                   "label": "Intro" if k == 1 else f"Bar {bar}",
+                   "color": _PHRASE_COLORS[k - 1]}
+    return {
+        "name": f"Every {bars} bars",
+        "description": f"{count} cues, one every {bars} bars from cue 1",
+        "phrase_bars": bars,
+        "cues": cues,
+    }
+
+
+def parse_phrase_name(name: str):
+    """'phrase-16' -> (16, default count); 'phrase-16-8' -> (16, 8); else None."""
+    if not name.startswith(PHRASE_PREFIX):
+        return None
+    parts = name[len(PHRASE_PREFIX):].split("-")
+    try:
+        bars = int(parts[0])
+        count = int(parts[1]) if len(parts) > 1 else DEFAULT_PHRASE_CUES
+    except (ValueError, IndexError):
+        raise ValueError(
+            f"Bad phrase template '{name}'. Use phrase-<bars> or "
+            f"phrase-<bars>-<cues>, e.g. phrase-16 or phrase-16-8")
+    return bars, count
+
+
 def load_template(name: str, user_dir: str | None = None) -> dict:
     """Load a cue template by name or file path.
 
     Search order:
-      1. If name is a path to an existing .yaml file, load it directly.
-      2. user_dir/<name>.yaml (if user_dir provided)
-      3. Bundled templates in this package
+      1. phrase-<bars>[-<cues>] builds a phrase-match template on the fly.
+      2. If name is a path to an existing .yaml file, load it directly.
+      3. user_dir/<name>.yaml (if user_dir provided)
+      4. Bundled templates in this package
     """
+    phrase = parse_phrase_name(name)
+    if phrase is not None:
+        return phrase_template(*phrase)
+
     path = Path(name)
     if path.suffix in ('.yaml', '.yml') and path.exists():
         return _load_and_validate(path.read_text(encoding='utf-8'), name)
@@ -46,7 +98,7 @@ def load_template(name: str, user_dir: str | None = None) -> dict:
     except (FileNotFoundError, TypeError):
         pass
 
-    available = list_templates()
+    available = list_templates() + [f"phrase-<bars>[-<cues>]"]
     raise FileNotFoundError(
         f"Template '{name}' not found. "
         f"Available: {', '.join(available)}"

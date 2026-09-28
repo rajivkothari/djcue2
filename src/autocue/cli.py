@@ -15,6 +15,27 @@ from autocue.codec import (
     CUE_POSITION_EMPTY,
 )
 from autocue.anchor import pick_anchor, resolve_bar_position, ANCHOR_MODES
+from autocue.grid import resolve_grid, engine_beat_data_from_grid, GRID_MODES
+from autocue.codec import encode_beat_data
+from autocue.db import write_beat_data
+
+
+def _load_analysis():
+    """Import the librosa-based structural analysis only when a template
+    actually needs it, so bar/phrase templates work without that extra."""
+    try:
+        from autocue.analysis import analyze_structure
+    except ImportError as e:
+        print(f"ERROR: {e}")
+        sys.exit(1)
+    return analyze_structure
+
+
+def _describe_grid(grid: dict) -> str:
+    s = f"grid: {grid['source']} {grid['tempo_bpm']:.1f} BPM"
+    if grid.get("note"):
+        s += f" ({grid['note']})"
+    return s
 
 
 ENGINE_COLORS = {
@@ -276,11 +297,6 @@ def cmd_set(args):
 
 
 def cmd_analyze(args):
-    try:
-        from autocue.analysis import analyze_structure
-    except ImportError as e:
-        print(f"ERROR: {e}")
-        sys.exit(1)
     from autocue.templates import load_template
 
     db = open_library(args.db, readonly=True)
@@ -321,29 +337,38 @@ def cmd_analyze(args):
 
     try:
         audio_path = resolve_audio_path(args.db, track["path"])
-    except FileNotFoundError as e:
-        print(f"ERROR: {e}")
-        sys.exit(1)
+    except FileNotFoundError:
+        audio_path = None
+    print(f"Audio: {audio_path or 'file not found'}")
 
-    print(f"Audio: {audio_path}")
-    print("Analyzing...")
-
-    analysis_params = template.get("analysis", {})
-    result = analyze_structure(str(audio_path), **analysis_params)
-
-    analysis_sr = result["sample_rate"]
     sample_rate = _get_sample_rate(track)
+    try:
+        grid = resolve_grid(track, getattr(args, "grid", "auto"), audio_path,
+                            sample_rate)
+    except Exception as e:
+        print(f"ERROR: AI grid failed: {e}")
+        sys.exit(1)
+    if grid is None or not grid["beats"]:
+        print(f"ERROR: {(grid or {}).get('note') or 'Track has no beat grid'}. "
+              f"Analyze it in Engine DJ, or use --grid ai.")
+        sys.exit(1)
+    print(f"Beat {_describe_grid(grid)}")
+    downbeats, beats = grid["downbeats"], grid["beats"]
+    samples_per_beat = grid["samples_per_beat"]
 
-    sr_scale = sample_rate / analysis_sr if analysis_sr != sample_rate else 1.0
-
-    downbeats = []
-    beats = []
-    samples_per_beat = None
-    if track["beat_data_blob"]:
-        beat_data = decode_beat_data(track["beat_data_blob"])
-        downbeats = get_downbeat_positions(beat_data)
-        beats = get_beat_positions(beat_data)
-        samples_per_beat = get_samples_per_beat(beat_data)
+    template_cues = template["cues"]
+    needs_analysis = any(not c["detect"].startswith("bar_")
+                         for c in template_cues.values())
+    result, sr_scale = None, 1.0
+    if needs_analysis:
+        if audio_path is None:
+            print("ERROR: audio file not found (needed for structural analysis)")
+            sys.exit(1)
+        analyze_structure = _load_analysis()
+        print("Analyzing audio structure...")
+        result = analyze_structure(str(audio_path), **template.get("analysis", {}))
+        analysis_sr = result["sample_rate"]
+        sr_scale = sample_rate / analysis_sr if analysis_sr != sample_rate else 1.0
 
     if track["quick_cues_blob"] is None:
         print("ERROR: Track has no quickCues blob. "
@@ -351,13 +376,13 @@ def cmd_analyze(args):
         sys.exit(1)
 
     cue_data = decode_quick_cues(track["quick_cues_blob"])
-    template_cues = template["cues"]
 
     beat_offset = getattr(args, "beat_offset", 0)
     picked = pick_anchor(
         getattr(args, "anchor", "auto"), main_cue=get_main_cue(cue_data),
         downbeats=downbeats, beats=beats, samples_per_beat=samples_per_beat,
-        sample_rate=sample_rate, detect_first_downbeat=_ai_detector(audio_path))
+        sample_rate=sample_rate, detect_first_downbeat=_ai_detector(audio_path),
+        grid_anchor=grid.get("first_downbeat"))
     anchor = picked["anchor"]
     print(f"Bar-1 {_describe_anchor(picked, sample_rate)}, "
           f"beat offset: {beat_offset}")
@@ -386,8 +411,8 @@ def cmd_analyze(args):
                       f"{'—':<12} {note}")
                 continue
         else:
-            raw_pos = result["positions"].get(detect_key)
-            confidence = result["confidences"].get(detect_key, 0.0)
+            raw_pos = result["positions"].get(detect_key) if result else None
+            confidence = result["confidences"].get(detect_key, 0.0) if result else 0.0
 
             if raw_pos is None:
                 note = "(optional — skipped)" if is_optional else "NOT DETECTED"
@@ -467,6 +492,13 @@ def cmd_analyze(args):
 
     db = open_library(args.db, readonly=False)
     write_quick_cues(db, track["id"], new_blob)
+    if getattr(args, "write_grid", False):
+        if grid["source"] == "ai":
+            bd = engine_beat_data_from_grid(grid, track["beat_data_blob"])
+            write_beat_data(db, track["id"], encode_beat_data(bd))
+            print(f"Beat grid written to Engine DJ ({grid['tempo_bpm']:.2f} BPM).")
+        else:
+            print("--write-grid ignored: grid came from Engine DJ, not AI.")
     db.close()
 
     print(f"Wrote {len(proposed)} cues. Open Engine DJ and verify.")
@@ -528,11 +560,6 @@ def cmd_serve(args):
 
 
 def cmd_batch(args):
-    try:
-        from autocue.analysis import analyze_structure
-    except ImportError as e:
-        print(f"ERROR: {e}")
-        sys.exit(1)
     from autocue.templates import load_template
 
     db = open_library(args.db, readonly=True)
@@ -582,9 +609,11 @@ def cmd_batch(args):
         not cue_def["detect"].startswith("bar_")
         for cue_def in template_cues.values()
     )
+    analyze_structure = _load_analysis() if needs_analysis else None
 
     stats = {"processed": 0, "cues_written": 0, "skipped": 0,
-             "errors": 0, "low_confidence": [], "anchors": {}}
+             "errors": 0, "low_confidence": [], "anchors": {}, "grids": {},
+             "grids_written": 0}
 
     for i, track in enumerate(tracks):
         prefix = f"[{i+1}/{len(tracks)}]"
@@ -624,35 +653,35 @@ def cmd_batch(args):
             stats["skipped"] += 1
             continue
 
-        downbeats = []
-        beats = []
-        samples_per_beat = None
-        total_samples = None
-        if track["beat_data_blob"]:
-            beat_data = decode_beat_data(track["beat_data_blob"])
-            downbeats = get_downbeat_positions(beat_data)
-            beats = get_beat_positions(beat_data)
-            samples_per_beat = get_samples_per_beat(beat_data)
-            total_samples = beat_data["total_samples"]
-
-        if not beats or samples_per_beat is None:
-            print(f"{prefix} SKIP {track['title']} — no beat grid")
-            stats["skipped"] += 1
-            continue
-
-        cue_data = decode_quick_cues(existing_cues_blob)
         sample_rate = _get_sample_rate(track)
-
         try:
             audio_path = resolve_audio_path(args.db, track["path"])
         except FileNotFoundError:
             audio_path = None
 
+        try:
+            grid = resolve_grid(track, args.grid, audio_path, sample_rate)
+        except Exception as e:
+            print(f"{prefix} ERROR {track['title']} — AI grid failed: {e}")
+            stats["errors"] += 1
+            continue
+        if grid is None or not grid["beats"]:
+            print(f"{prefix} SKIP {track['title']} — "
+                  f"{(grid or {}).get('note') or 'no beat grid'}")
+            stats["skipped"] += 1
+            continue
+        downbeats, beats = grid["downbeats"], grid["beats"]
+        samples_per_beat = grid["samples_per_beat"]
+        total_samples = grid.get("total_samples")
+
+        cue_data = decode_quick_cues(existing_cues_blob)
+
         picked = pick_anchor(
             args.anchor, main_cue=get_main_cue(cue_data),
             downbeats=downbeats, beats=beats,
             samples_per_beat=samples_per_beat, sample_rate=sample_rate,
-            detect_first_downbeat=_ai_detector(audio_path))
+            detect_first_downbeat=_ai_detector(audio_path),
+            grid_anchor=grid.get("first_downbeat"))
         anchor = picked["anchor"]
         if anchor is None:
             print(f"{prefix} SKIP {track['title']} — no usable bar-1 anchor "
@@ -669,7 +698,8 @@ def cmd_batch(args):
                 continue
 
             print(f"{prefix} Analyzing {track['title']} "
-                  f"({_describe_anchor(picked, sample_rate)})...",
+                  f"({_describe_grid(grid)}; "
+                  f"{_describe_anchor(picked, sample_rate)})...",
                   end="", flush=True)
 
             try:
@@ -683,7 +713,8 @@ def cmd_batch(args):
             sr_scale = sample_rate / analysis_sr if analysis_sr != sample_rate else 1.0
         else:
             print(f"{prefix} {track['title']} "
-                  f"({_describe_anchor(picked, sample_rate)})...",
+                  f"({_describe_grid(grid)}; "
+                  f"{_describe_anchor(picked, sample_rate)})...",
                   end="", flush=True)
 
         proposed = []
@@ -760,13 +791,21 @@ def cmd_batch(args):
             new_blob = encode_quick_cues(cue_data)
             wdb = open_library(args.db, readonly=False)
             write_quick_cues(wdb, track["id"], new_blob)
+            msg = f" {len(proposed)} cues written"
+            if args.write_grid and grid["source"] == "ai":
+                bd = engine_beat_data_from_grid(grid, track["beat_data_blob"])
+                write_beat_data(wdb, track["id"], encode_beat_data(bd))
+                stats["grids_written"] += 1
+                msg += " + grid"
             wdb.close()
-            print(f" {len(proposed)} cues written")
+            print(msg)
             stats["cues_written"] += len(proposed)
 
         stats["processed"] += 1
         stats["anchors"][picked["source"]] = (
             stats["anchors"].get(picked["source"], 0) + 1)
+        stats["grids"][grid["source"]] = (
+            stats["grids"].get(grid["source"], 0) + 1)
 
     # Summary
     print(f"\n{'='*50}")
@@ -776,6 +815,11 @@ def cmd_batch(args):
         print(f"Cues written: {stats['cues_written']}")
         if backup_path:
             print(f"Backup: {backup_path}")
+    if stats["grids"]:
+        print("Beat grids: " + ", ".join(
+            f"{k} {v}" for k, v in stats["grids"].items())
+              + (f"; {stats['grids_written']} written to Engine DJ"
+                 if stats["grids_written"] else ""))
     if stats["anchors"]:
         print("Bar-1 anchors: " + ", ".join(
             f"{k} {v}" for k, v in stats["anchors"].items()))
@@ -783,6 +827,21 @@ def cmd_batch(args):
         print(f"\nLow-confidence tracks (review manually):")
         for t in stats["low_confidence"]:
             print(f"  - {t}")
+
+
+def _add_grid_and_phrase_args(p):
+    p.add_argument("--grid", choices=GRID_MODES, default="auto",
+                   help="Beat grid to place cues on: auto (Engine DJ's grid, "
+                        "or AI when the track has none), engine, or ai. "
+                        "'ai' needs: pip install autocue[beats]")
+    p.add_argument("--write-grid", action="store_true",
+                   help="Also write the AI beat grid into Engine DJ, replacing "
+                        "its grid for the track (only when the grid came from AI)")
+    p.add_argument("--phrase", type=int, metavar="BARS",
+                   help="Phrase-match cues: cue 1 at bar 1, then one cue every "
+                        "BARS bars (e.g. 16). Overrides --template.")
+    p.add_argument("--phrase-cues", type=int, default=6, metavar="N",
+                   help="How many cues --phrase places, 1-8 (default: 6)")
 
 
 def main():
@@ -850,6 +909,7 @@ def main():
     p_analyze.add_argument("--anchor", choices=ANCHOR_MODES, default="auto",
                            help="How to find bar 1: auto (main cue, then AI "
                                 "downbeat, then grid), main-cue, ai, or grid")
+    _add_grid_and_phrase_args(p_analyze)
     p_analyze.set_defaults(func=cmd_analyze)
 
     p_lp = sub.add_parser("list-playlists", help="List Engine DJ playlists")
@@ -893,12 +953,16 @@ def main():
                          help="How to find bar 1: auto (main cue, then AI "
                               "downbeat, then grid), main-cue, ai, or grid. "
                               "'ai' needs: pip install autocue[beats]")
+    _add_grid_and_phrase_args(p_batch)
     p_batch.set_defaults(func=cmd_batch)
 
     args = parser.parse_args()
     if not hasattr(args, 'db'):
         args.db = _DB_DEFAULT
     args.db = str(__import__("pathlib").Path(args.db).expanduser())
+
+    if getattr(args, "phrase", None):
+        args.template = f"phrase-{args.phrase}-{args.phrase_cues}"
 
     if hasattr(args, 'color') and args.color is None and hasattr(args, 'cue'):
         default_color = DEFAULT_CUE_COLORS.get(args.cue, "yellow")

@@ -115,22 +115,28 @@
       </div>
 
       <div class="panel">
-        <h3>Step 1 — Bar 1 (first beat)</h3>
+        <h3>Step 1 — Beat grid &amp; bar 1</h3>
+        <div class="row" style="margin-bottom:8px;">
+          <span class="hint">Grid</span>
+          <button class="btn" id="grid-engine" onclick="useGrid('engine')" title="Engine DJ's stored beat grid">Engine DJ</button>
+          <button class="btn" id="grid-ai" onclick="useGrid('ai')" title="Detect beats and downbeats from the audio and fit a fresh grid">AI (Beat This!)</button>
+          <span class="hint" id="grid-info"></span>
+        </div>
         <div class="row">
           <span class="anchor-time" id="anchor-time">—</span>
           <button class="btn" onclick="setAnchor(ws.getCurrentTime())" title="Use the current playhead position">Set at playhead</button>
           <button class="btn" id="set-mode-btn" onclick="toggleSetMode()" title="Then click anywhere on the waveform">Click to set</button>
           <span style="width:12px"></span>
           <button class="btn" id="btn-main" onclick="useCandidate('main')">Main cue</button>
-          <button class="btn" id="btn-grid" onclick="useCandidate('grid')">Engine grid</button>
-          <button class="btn" id="btn-ai" onclick="detectAI()">AI detect</button>
+          <button class="btn" id="btn-grid" onclick="useCandidate('grid')" title="The grid's own bar 1">Grid bar 1</button>
+          <button class="btn" id="btn-ai" onclick="detectAI()" title="First downbeat the AI hears">AI downbeat</button>
           <span style="width:12px"></span>
           <button class="btn sm" onclick="nudge(-4)" title="one bar earlier">&laquo; bar</button>
           <button class="btn sm" onclick="nudge(-1)" title="one beat earlier">&lsaquo; beat</button>
           <button class="btn sm" onclick="nudge(1)" title="one beat later">beat &rsaquo;</button>
           <button class="btn sm" onclick="nudge(4)" title="one bar later">bar &raquo;</button>
           <button class="btn sm" onclick="previewAt(anchor)" title="play 8 seconds from bar 1">&#9654; from bar 1</button>
-          <label class="chk" style="margin-left:auto"><input type="checkbox" id="snap" checked> Snap to Engine grid beats</label>
+          <label class="chk" style="margin-left:auto"><input type="checkbox" id="snap" checked> Snap to grid beats</label>
         </div>
         <div class="status" id="anchor-status"></div>
       </div>
@@ -138,7 +144,8 @@
       <div class="panel">
         <h3>Step 2 — Generate the rest</h3>
         <div class="row">
-          <select id="template"></select>
+          <select id="template" onchange="onTemplateChange()"></select>
+          <label class="chk" id="phrase-count-wrap" style="display:none">&times; <input type="number" id="phrase-cues" min="1" max="8" value="6" style="width:52px"> cues</label>
           <button class="btn primary" id="gen-btn" onclick="generate()">Generate cues from bar 1</button>
           <button class="btn" onclick="reloadExisting()" title="Discard edits and show the cues currently in Engine DJ">Reload existing</button>
           <button class="btn" onclick="addCueAtPlayhead()">+ Add cue at playhead</button>
@@ -158,6 +165,9 @@
           <label class="chk"><input type="checkbox" id="tgt-vdj"> VirtualDJ <span class="hint" id="vdj-hint">(database.xml)</span></label>
           <button class="btn success" id="save-btn" onclick="save()" style="margin-left:auto">Save cues</button>
         </div>
+        <div class="row" id="tgt-grid-wrap" style="display:none; margin-top:6px;">
+          <label class="chk"><input type="checkbox" id="tgt-grid"> Also replace Engine DJ's beat grid with the AI grid <span class="hint">(experimental · backed up · check sync in Engine afterwards)</span></label>
+        </div>
         <div class="results" id="save-results"></div>
       </div>
     </div>
@@ -168,6 +178,7 @@
 let ws = null, regions = null, track = null, cues = [], anchor = null;
 let colors = {}, setMode = false, previewTimer = null, libraryTimer = null;
 let ai = { seconds: null };
+let gridSource = 'engine', engineGrid = null, aiGrid = null, templates = [];
 
 const $ = id => document.getElementById(id);
 const esc = s => { const d = document.createElement('div'); d.textContent = s ?? ''; return d.innerHTML; };
@@ -188,8 +199,9 @@ async function init() {
     const s = await (await fetch('/api/schema')).json();
     $('schema-badge').textContent = `Schema ${s.version || s.error}`;
     colors = await (await fetch('/api/colors')).json();
-    const templates = await (await fetch('/api/templates')).json();
+    templates = await (await fetch('/api/templates')).json();
     for (const t of templates) { const o = document.createElement('option'); o.value = t.id; o.textContent = t.name; $('template').appendChild(o); }
+    onTemplateChange();
   } catch (e) { $('schema-badge').textContent = 'Connection error'; }
   loadLibrary('');
   $('search').addEventListener('input', e => { clearTimeout(libraryTimer); libraryTimer = setTimeout(() => loadLibrary(e.target.value), 250); });
@@ -221,7 +233,10 @@ async function selectTrack(id) {
   const r = await fetch(`/api/track/${id}`);
   const data = await r.json();
   if (data.error) { alert(data.error); return; }
-  track = data; ai = { seconds: null };
+  track = data; ai = { seconds: null }; aiGrid = null;
+  engineGrid = track.beats.length ? { beats: track.beats, downbeats: track.downbeats, seconds_per_beat: track.seconds_per_beat,
+    tempo_bpm: track.seconds_per_beat ? 60 / track.seconds_per_beat : track.bpm, first_downbeat_seconds: track.grid_first_downbeat_seconds } : null;
+  gridSource = engineGrid ? 'engine' : 'ai';
   document.querySelectorAll('.track-item').forEach(el => el.classList.toggle('active', +el.dataset.id === id));
   $('empty').style.display = 'none'; $('editor').style.display = 'block';
   $('t-title').textContent = track.title;
@@ -239,9 +254,60 @@ async function selectTrack(id) {
   $('anchor-status').innerHTML = anchor == null ? '<span class="warn">No main cue or grid — set bar 1 manually.</span>'
     : `Starting from ${track.main_cue_seconds != null ? '<b>main cue</b>' : '<b>Engine grid</b>'}. Check it against the audio, then generate.`;
 
-  renderTable(); updateAnchorUI();
+  renderTable(); updateAnchorUI(); renderGridUI();
   try { loadWaveform(); }
   catch (e) { $('anchor-status').innerHTML = `<span class="err">Waveform unavailable: ${esc(String(e))}. You can still edit times in the table.</span>`; }
+  if (!engineGrid) detectGrid();      // no Engine grid: build one from the audio
+}
+
+// ---------------------------------------------------------------- beat grid
+function renderGridUI() {
+  $('grid-engine').classList.toggle('on', gridSource === 'engine');
+  $('grid-ai').classList.toggle('on', gridSource === 'ai');
+  $('grid-engine').disabled = !engineGrid;
+  $('tgt-grid-wrap').style.display = gridSource === 'ai' && aiGrid ? '' : 'none';
+  if (gridSource === 'ai' && aiGrid) {
+    let s = `AI · ${aiGrid.tempo_bpm.toFixed(2)} BPM · first beat ${fmt(aiGrid.first_downbeat_seconds)} · ${aiGrid.n_detected} beats heard`;
+    if (aiGrid.note) s += ` <span class="warn">— ${esc(aiGrid.note)}</span>`;
+    $('grid-info').innerHTML = s;
+  } else if (engineGrid) {
+    $('grid-info').innerHTML = `Engine DJ · ${engineGrid.tempo_bpm.toFixed(2)} BPM · ${engineGrid.beats.length} beats`;
+  } else {
+    $('grid-info').innerHTML = '<span class="warn">No Engine DJ beat grid for this track.</span>';
+  }
+}
+function applyGrid(g) {
+  track.beats = g.beats; track.downbeats = g.downbeats; track.seconds_per_beat = g.seconds_per_beat;
+  // Keep the DJ's own main cue as bar 1 (re-snapped); otherwise take the grid's bar 1.
+  if (track.main_cue_seconds != null && anchor != null) anchor = maybeSnap(anchor);
+  else if (g.first_downbeat_seconds != null) anchor = maybeSnap(g.first_downbeat_seconds);
+  renderMarkers(); updateAnchorUI(); renderGridUI();
+}
+function useGrid(src) {
+  if (src === 'ai') { if (!aiGrid) return detectGrid(); gridSource = 'ai'; applyGrid(aiGrid); }
+  else if (engineGrid) { gridSource = 'engine'; applyGrid(engineGrid); }
+}
+async function detectGrid() {
+  $('grid-ai').disabled = true;
+  $('grid-info').innerHTML = '<span class="spinner"></span>Listening to the track (about 10 s)…';
+  try {
+    const r = await (await fetch(`/api/track/${track.id}/grid?source=ai`)).json();
+    if (r.error) { $('grid-info').innerHTML = `<span class="err">${esc(r.error)}</span>`; return; }
+    aiGrid = r; gridSource = 'ai'; applyGrid(aiGrid);
+    $('anchor-status').innerHTML = `Bar 1 from the AI grid${track.main_cue_seconds != null ? ' (kept your main cue, snapped to the new grid)' : ''}. Listen with <b>&#9654; from bar 1</b>, nudge if needed, then generate.`;
+  } catch (e) { $('grid-info').innerHTML = `<span class="err">${esc(String(e))}</span>`; }
+  finally { $('grid-ai').disabled = false; }
+}
+function onTemplateChange() {
+  const sel = $('template').value;
+  $('phrase-count-wrap').style.display = sel.startsWith('phrase-') ? '' : 'none';
+}
+function currentTemplateId() {
+  const sel = $('template').value;
+  if (!sel.startsWith('phrase-')) return sel;
+  const bars = sel.split('-')[1];
+  const n = Math.min(8, Math.max(1, parseInt($('phrase-cues').value, 10) || 6));
+  return `phrase-${bars}-${n}`;
 }
 
 function loadWaveform() {
@@ -301,7 +367,7 @@ function toggleSetMode(force) {
 }
 function useCandidate(which) {
   if (which === 'main') setAnchor(track.main_cue_seconds);
-  if (which === 'grid') setAnchor(track.grid_first_downbeat_seconds);
+  if (which === 'grid') setAnchor(gridSource === 'ai' && aiGrid ? aiGrid.first_downbeat_seconds : track.grid_first_downbeat_seconds);
   if (which === 'ai') setAnchor(ai.seconds);
 }
 function nudge(beats) {
@@ -335,12 +401,12 @@ async function generate() {
   if (anchor == null) return;
   $('gen-status').innerHTML = '<span class="spinner"></span>Generating…';
   const r = await (await fetch('/api/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ track_id: track.id, template: $('template').value, anchor_seconds: anchor }) })).json();
+    body: JSON.stringify({ track_id: track.id, template: currentTemplateId(), anchor_seconds: anchor, grid: gridSource }) })).json();
   if (r.error) { $('gen-status').innerHTML = `<span class="err">${esc(r.error)}</span>`; return; }
   cues = r.proposed.map(p => ({ slot: p.slot, label: p.label, color_name: p.color_name, time: p.time_seconds }));
   const dropped = r.unsupported.length ? ` <span class="warn">Skipped analysis-based ${esc(r.unsupported.join(', '))} — this editor is bar-based.</span>` : '';
   const beyond = r.beyond_end && r.beyond_end.length ? ` <span class="warn">Cue${r.beyond_end.length > 1 ? 's' : ''} ${r.beyond_end.join(', ')} would fall past the end of the track — skipped.</span>` : '';
-  $('gen-status').innerHTML = `<span class="ok">${cues.length} cues placed from bar 1.</span> Drag markers or edit times, then save.${dropped}${beyond}`;
+  $('gen-status').innerHTML = `<span class="ok">${cues.length} cues placed from bar 1</span> (${esc(r.template_name || '')}, ${esc(r.grid.source)} grid ${r.grid.tempo_bpm.toFixed(1)} BPM). Drag markers or edit times, then save.${dropped}${beyond}`;
   renderTable(); renderMarkers();
 }
 function reloadExisting() {
@@ -393,8 +459,9 @@ function previewAt(t) {
 
 // ---------------------------------------------------------------- save
 async function save() {
-  const targets = { engine: $('tgt-engine').checked, serato: $('tgt-serato').checked, vdj: $('tgt-vdj').checked };
-  if (!targets.engine && !targets.serato && !targets.vdj) { $('save-results').innerHTML = '<span class="warn">Pick at least one target.</span>'; return; }
+  const targets = { engine: $('tgt-engine').checked, serato: $('tgt-serato').checked, vdj: $('tgt-vdj').checked,
+                    engine_grid: gridSource === 'ai' && !!aiGrid && $('tgt-grid').checked };
+  if (!targets.engine && !targets.serato && !targets.vdj && !targets.engine_grid) { $('save-results').innerHTML = '<span class="warn">Pick at least one target.</span>'; return; }
   $('save-btn').disabled = true;
   $('save-results').innerHTML = '<span class="spinner"></span>Saving…';
   try {
@@ -402,7 +469,7 @@ async function save() {
       body: JSON.stringify({ track_id: track.id, targets, clear_missing: true,
         cues: cues.map(c => ({ slot: c.slot, label: c.label, color_name: c.color_name, time_seconds: c.time })) }) })).json();
     if (r.error) { $('save-results').innerHTML = `<span class="err">${esc(r.error)}</span>`; return; }
-    const names = { engine: 'Engine DJ', serato: 'Serato / djay Pro (file tags)', vdj: 'VirtualDJ' };
+    const names = { engine: 'Engine DJ', serato: 'Serato / djay Pro (file tags)', vdj: 'VirtualDJ', engine_grid: 'Engine DJ beat grid' };
     $('save-results').innerHTML = Object.entries(r.results).map(([k, v]) =>
       `<div><span class="${v.ok ? 'ok' : 'err'}">${v.ok ? '&#10003;' : '&#10007;'}</span> <b>${names[k]}</b>: ${esc(v.message)}${v.backup ? ` <span class="hint">backup: ${esc(v.backup)}</span>` : ''}</div>`).join('')
       + (targets.serato && r.results.serato?.ok ? '<div class="hint">djay Pro: re-import or re-analyze the track so it picks up the Serato cue tags.</div>' : '');

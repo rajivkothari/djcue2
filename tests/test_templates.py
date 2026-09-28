@@ -23,6 +23,31 @@ class TestLoadTemplate:
             load_template("nonexistent_genre")
 
 
+class TestPhraseTemplates:
+    def test_default_count_and_positions(self):
+        t = load_template("phrase-16")
+        assert t["name"] == "Every 16 bars" and t["phrase_bars"] == 16
+        assert [t["cues"][k]["detect"] for k in range(1, 7)] == [
+            "bar_1", "bar_17", "bar_33", "bar_49", "bar_65", "bar_81"]
+        assert t["cues"][1]["label"] == "Intro"
+        assert t["cues"][2]["label"] == "Bar 17"
+        assert validate_template(t) == []
+
+    def test_explicit_count(self):
+        t = load_template("phrase-8-8")
+        assert len(t["cues"]) == 8
+        assert t["cues"][8]["detect"] == "bar_57"
+
+    def test_bad_phrase_names(self):
+        for bad in ("phrase-x", "phrase-16-9", "phrase-0", "phrase-16-0"):
+            with pytest.raises(ValueError):
+                load_template(bad)
+
+    def test_unknown_template_mentions_phrase(self):
+        with pytest.raises(FileNotFoundError, match="phrase-<bars>"):
+            load_template("nope")
+
+
 class TestListTemplates:
     def test_lists_bundled(self):
         names = list_templates()

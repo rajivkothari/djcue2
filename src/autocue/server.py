@@ -14,6 +14,10 @@ from autocue.codec import (
     CUE_POSITION_EMPTY,
 )
 from autocue.anchor import pick_anchor, resolve_bar_position, ANCHOR_MODES
+from autocue.grid import resolve_grid, engine_beat_data_from_grid, GRID_MODES
+from autocue.codec import encode_beat_data
+from autocue.db import write_beat_data
+from autocue.templates import PHRASE_PRESETS, DEFAULT_PHRASE_CUES
 from autocue.constants import (
     ENGINE_COLORS, ENGINE_COLORS_HEX, DEFAULT_CUE_COLORS, get_sample_rate,
     format_time,
@@ -95,9 +99,10 @@ def api_crates():
 @app.route("/api/templates")
 def api_templates():
     try:
-        names = list_templates()
-        result = []
-        for name in names:
+        result = [{"id": f"phrase-{b}", "name": f"Every {b} bars",
+                   "phrase_bars": b, "default_cues": DEFAULT_PHRASE_CUES}
+                  for b in PHRASE_PRESETS]
+        for name in list_templates():
             t = load_template(name)
             result.append({"id": name, "name": t.get("name", name)})
         return jsonify(result)
@@ -210,32 +215,31 @@ def api_analyze():
     )
 
     sample_rate = get_sample_rate(track)
+    audio_path = _audio_path_or_none(track)
 
-    downbeats = []
-    beats = []
-    samples_per_beat = None
-    if track["beat_data_blob"]:
-        beat_data = decode_beat_data(track["beat_data_blob"])
-        downbeats = get_downbeat_positions(beat_data)
-        beats = get_beat_positions(beat_data)
-        samples_per_beat = get_samples_per_beat(beat_data)
+    grid_mode = data.get("grid", "auto")
+    if grid_mode not in GRID_MODES:
+        return jsonify({"error": f"Unknown grid mode '{grid_mode}'"}), 400
+    try:
+        grid = resolve_grid(track, grid_mode, audio_path, sample_rate)
+    except Exception as e:
+        return jsonify({"error": f"AI grid failed: {e}"}), 400
+    if grid is None or not grid["beats"]:
+        return jsonify({"error": (grid or {}).get("note")
+                        or "Track has no beat grid in Engine DJ"}), 400
+    downbeats, beats = grid["downbeats"], grid["beats"]
+    samples_per_beat = grid["samples_per_beat"]
 
     existing_cue_data = None
     if track["quick_cues_blob"]:
         existing_cue_data = decode_quick_cues(track["quick_cues_blob"])
 
-    audio_path = None
-    if track["path"]:
-        try:
-            audio_path = resolve_audio_path(_db_path, track["path"])
-        except FileNotFoundError:
-            audio_path = None
-
     main_cue = get_main_cue(existing_cue_data) if existing_cue_data else None
     picked = pick_anchor(
         anchor_mode, main_cue=main_cue, downbeats=downbeats, beats=beats,
         samples_per_beat=samples_per_beat, sample_rate=sample_rate,
-        detect_first_downbeat=_ai_detector(audio_path))
+        detect_first_downbeat=_ai_detector(audio_path),
+        grid_anchor=grid.get("first_downbeat"))
     anchor = picked["anchor"]
 
     result = None
@@ -321,6 +325,8 @@ def api_analyze():
         "template": template_name,
         "sample_rate": sample_rate,
         "proposed": proposed,
+        "grid": {"source": grid["source"], "tempo_bpm": grid["tempo_bpm"],
+                 "note": grid.get("note", "")},
         "anchor": {
             "source": picked["source"],
             "note": picked["note"],
@@ -548,6 +554,47 @@ def api_ai_downbeat(track_id):
     return jsonify({"seconds": secs})
 
 
+def _grid_summary(grid: dict, sample_rate: float) -> dict:
+    """JSON-friendly view of a grid, times in seconds."""
+    out = {
+        "source": grid["source"],
+        "tempo_bpm": grid["tempo_bpm"],
+        "seconds_per_beat": grid["samples_per_beat"] / sample_rate,
+        "beats": [b / sample_rate for b in grid["beats"]],
+        "downbeats": [d / sample_rate for d in grid["downbeats"]],
+        "note": grid.get("note", ""),
+    }
+    if grid.get("first_downbeat") is not None:
+        out["first_downbeat_seconds"] = grid["first_downbeat"] / sample_rate
+    for k in ("variable_tempo", "rms_residual_ms", "n_detected"):
+        if k in grid:
+            out[k] = grid[k]
+    return out
+
+
+@app.route("/api/track/<int:track_id>/grid")
+def api_track_grid(track_id):
+    """Beat grid for a track: ?source=engine|ai (default engine)."""
+    track = _get_track(track_id)
+    if track is None:
+        return jsonify({"error": "Track not found"}), 404
+    source = request.args.get("source", "engine")
+    if source not in GRID_MODES:
+        return jsonify({"error": f"Unknown grid source '{source}'"}), 400
+    sample_rate = get_sample_rate(track)
+    try:
+        grid = resolve_grid(track, source, _audio_path_or_none(track), sample_rate)
+    except ImportError as e:
+        return jsonify({"error": str(e)}), 400
+    except FileNotFoundError:
+        return jsonify({"error": "Audio file not found"}), 404
+    except Exception as e:
+        return jsonify({"error": f"AI grid failed: {e}"}), 500
+    if grid is None or not grid["beats"]:
+        return jsonify({"error": (grid or {}).get("note") or "No beat grid"}), 404
+    return jsonify(_grid_summary(grid, sample_rate))
+
+
 @app.route("/api/generate", methods=["POST"])
 def api_generate():
     data = request.json
@@ -557,17 +604,23 @@ def api_generate():
     anchor_seconds = data.get("anchor_seconds")
     if anchor_seconds is None:
         return jsonify({"error": "Set bar 1 first"}), 400
-    template = load_template(data.get("template", "edm"))
+    try:
+        template = load_template(data.get("template", "edm"))
+    except (FileNotFoundError, ValueError) as e:
+        return jsonify({"error": str(e)}), 400
 
+    grid_mode = data.get("grid", "auto")
+    if grid_mode not in GRID_MODES:
+        return jsonify({"error": f"Unknown grid mode '{grid_mode}'"}), 400
     sample_rate = get_sample_rate(track)
-    beats, spb, total = [], None, None
-    if track["beat_data_blob"]:
-        bd = decode_beat_data(track["beat_data_blob"])
-        beats = get_beat_positions(bd)
-        spb = get_samples_per_beat(bd)
-        total = bd["total_samples"]
-    if spb is None:
-        return jsonify({"error": "Track has no beat grid in Engine DJ"}), 400
+    try:
+        grid = resolve_grid(track, grid_mode, _audio_path_or_none(track), sample_rate)
+    except Exception as e:
+        return jsonify({"error": f"AI grid failed: {e}"}), 400
+    if grid is None or not grid["beats"]:
+        return jsonify({"error": (grid or {}).get("note")
+                        or "Track has no beat grid in Engine DJ"}), 400
+    beats, spb, total = grid["beats"], grid["samples_per_beat"], grid.get("total_samples")
 
     anchor = float(anchor_seconds) * sample_rate
     proposed, unsupported, beyond_end = [], [], []
@@ -591,7 +644,11 @@ def api_generate():
                          "color_hex": ENGINE_COLORS_HEX[color_name],
                          "time_seconds": t, "time_display": format_time(t)})
     return jsonify({"proposed": proposed, "unsupported": unsupported,
-                    "beyond_end": beyond_end})
+                    "beyond_end": beyond_end,
+                    "grid": {"source": grid["source"],
+                             "tempo_bpm": grid["tempo_bpm"],
+                             "note": grid.get("note", "")},
+                    "template_name": template.get("name")})
 
 
 @app.route("/favicon.ico")
@@ -653,6 +710,32 @@ def api_save():
                 wdb.close()
             results["engine"] = {"ok": True, "message": f"Wrote {len(cues)} cues",
                                  "backup": str(backup)}
+
+    # --- AI beat grid into Engine DJ (opt-in) ----------------------------
+    if targets.get("engine_grid"):
+        if is_engine_dj_running():
+            results["engine_grid"] = {"ok": False, "message": "Engine DJ is running. Close it first."}
+        elif audio_path is None:
+            results["engine_grid"] = {"ok": False, "message": "Audio file not found"}
+        else:
+            try:
+                grid = resolve_grid(track, "ai", audio_path, sample_rate)
+                if grid is None or not grid["beats"]:
+                    raise RuntimeError("AI could not build a grid for this track")
+                bd = engine_beat_data_from_grid(grid, track["beat_data_blob"])
+                backup = (results.get("engine", {}).get("backup")
+                          or str(backup_library(_db_path)))
+                wdb = _conn(readonly=False)
+                try:
+                    write_beat_data(wdb, track["id"], encode_beat_data(bd))
+                finally:
+                    wdb.close()
+                results["engine_grid"] = {
+                    "ok": True, "backup": backup,
+                    "message": f"Replaced Engine DJ's beat grid: {grid['tempo_bpm']:.2f} BPM, "
+                               f"bar 1 at {format_time(grid['first_downbeat'] / sample_rate)}"}
+            except Exception as e:
+                results["engine_grid"] = {"ok": False, "message": str(e)}
 
     # --- Serato tags in the audio file (also read by djay Pro) ----------
     if targets.get("serato"):

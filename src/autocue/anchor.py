@@ -52,7 +52,8 @@ def resolve_bar_position(detect_key: str, anchor: float | None,
 
 def pick_anchor(mode: str, *, main_cue: float | None, downbeats: list[float],
                 beats: list[float], samples_per_beat: float | None,
-                sample_rate: float, detect_first_downbeat=None) -> dict:
+                sample_rate: float, detect_first_downbeat=None,
+                grid_anchor: float | None = None) -> dict:
     """Choose the bar-1 anchor for a track.
 
     detect_first_downbeat is a zero-argument callable returning the first
@@ -61,6 +62,9 @@ def pick_anchor(mode: str, *, main_cue: float | None, downbeats: list[float],
     that already have a main cue in auto mode. Any exception it raises is
     caught and reported in the note rather than aborting a batch.
 
+    grid_anchor overrides the grid's own bar-1 guess (an AI grid knows its
+    first downbeat; Engine's grid is assumed to start on one).
+
     Returns {"anchor", "source", "candidates", "note"} where candidates
     holds every anchor we computed (samples), for diagnostics.
     """
@@ -68,7 +72,10 @@ def pick_anchor(mode: str, *, main_cue: float | None, downbeats: list[float],
         raise ValueError(f"Unknown anchor mode '{mode}'. "
                          f"Choose from: {', '.join(ANCHOR_MODES)}")
 
-    grid = downbeats[0] if downbeats else (beats[0] if beats else None)
+    if grid_anchor is not None:
+        grid = grid_anchor
+    else:
+        grid = downbeats[0] if downbeats else (beats[0] if beats else None)
     candidates = {"main_cue": main_cue, "ai": None, "grid": grid}
     notes = []
 
