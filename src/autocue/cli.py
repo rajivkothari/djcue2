@@ -356,6 +356,8 @@ def cmd_analyze(args):
     downbeats, beats = grid["downbeats"], grid["beats"]
     samples_per_beat = grid["samples_per_beat"]
 
+    from autocue.templates import with_intro
+    template = with_intro(template, getattr(args, "intro_bars", 0) or 0)
     template_cues = template["cues"]
     needs_analysis = any(not c["detect"].startswith("bar_")
                          for c in template_cues.values())
@@ -556,7 +558,8 @@ def cmd_serve(args):
         print("ERROR: GUI requires Flask. Install with: pip install autocue[gui]")
         sys.exit(1)
     run_server(args.db, host=args.host, port=args.port,
-               vdj_db=getattr(args, "vdj_db", None))
+               vdj_db=getattr(args, "vdj_db", None),
+               rekordbox_xml=getattr(args, "rekordbox_xml", None))
 
 
 def cmd_batch(args):
@@ -602,195 +605,67 @@ def cmd_batch(args):
         backup_path = backup_library(args.db)
         print(f"Backup: {backup_path}")
 
-    analysis_params = template.get("analysis", {})
-    template_cues = template["cues"]
+    from autocue.pipeline import plan_track, needs_analysis, apply_cues_to_blob
+    from autocue.templates import with_intro
 
-    needs_analysis = any(
-        not cue_def["detect"].startswith("bar_")
-        for cue_def in template_cues.values()
-    )
-    analyze_structure = _load_analysis() if needs_analysis else None
+    template = with_intro(template, getattr(args, "intro_bars", 0) or 0)
+    if template.get("intro_bars"):
+        print(f"Intro: {template['intro_bars']} bars")
+    analyze = _load_analysis() if needs_analysis(template) else None
 
-    stats = {"processed": 0, "cues_written": 0, "skipped": 0,
-             "errors": 0, "low_confidence": [], "anchors": {}, "grids": {},
-             "grids_written": 0}
+    rb_xml = getattr(args, "rekordbox_xml", None)
+    if rb_xml and not args.dry_run:
+        from pathlib import Path as _P
+        import shutil as _shutil
+        if _P(rb_xml).exists():
+            stamp = __import__("datetime").datetime.now().strftime("%Y%m%d_%H%M%S")
+            _shutil.copy2(rb_xml, f"{rb_xml}.backup_{stamp}")
+        print(f"rekordbox XML: {rb_xml}")
+
+    stats = {"processed": 0, "cues_written": 0, "skipped": 0, "errors": 0,
+             "review": [], "anchors": {}, "grids": {}, "grids_written": 0}
 
     for i, track in enumerate(tracks):
         prefix = f"[{i+1}/{len(tracks)}]"
-
-        existing_cues_blob = track["quick_cues_blob"]
-        if existing_cues_blob:
-            cue_data = decode_quick_cues(existing_cues_blob)
-            active = [c for c in cue_data["cues"] if is_cue_active(c)]
-            if active and not args.overwrite:
-                print(f"{prefix} SKIP {track['title']} — "
-                      f"{len(active)} existing cues (use --overwrite)")
-                stats["skipped"] += 1
-                continue
-
-        if not track["path"]:
-            print(f"{prefix} ERROR {track['title']} — no file path")
-            stats["errors"] += 1
-            continue
-
-        if track["beat_data_blob"]:
-            bd = decode_beat_data(track["beat_data_blob"])
-            dur_secs = bd["total_samples"] / bd["sample_rate"] if bd["sample_rate"] > 0 else 0
-            if dur_secs > args.max_duration:
-                print(f"{prefix} SKIP {track['title']} — "
-                      f"{_format_time(dur_secs)} exceeds {args.max_duration // 60:.0f}min limit")
-                stats["skipped"] += 1
-                continue
-            if dur_secs < 30:
-                print(f"{prefix} SKIP {track['title']} — "
-                      f"too short ({dur_secs:.0f}s)")
-                stats["skipped"] += 1
-                continue
-
-        existing_cues_blob = track["quick_cues_blob"]
-        if not existing_cues_blob:
-            print(f"{prefix} SKIP {track['title']} — no quickCues blob")
-            stats["skipped"] += 1
-            continue
-
         sample_rate = _get_sample_rate(track)
-        try:
-            audio_path = resolve_audio_path(args.db, track["path"])
-        except FileNotFoundError:
-            audio_path = None
+        audio_path = None
+        if track["path"]:
+            try:
+                audio_path = resolve_audio_path(args.db, track["path"])
+            except FileNotFoundError:
+                audio_path = None
 
-        try:
-            grid = resolve_grid(track, args.grid, audio_path, sample_rate)
-        except Exception as e:
-            print(f"{prefix} ERROR {track['title']} — AI grid failed: {e}")
+        plan = plan_track(
+            track, template, sample_rate=sample_rate, audio_path=audio_path,
+            grid_mode=args.grid, anchor_mode=args.anchor,
+            beat_offset=args.beat_offset, overwrite=args.overwrite,
+            max_duration=args.max_duration, analyze=analyze,
+            ai_detector=_ai_detector(audio_path))
+
+        if plan["status"] == "skip":
+            print(f"{prefix} SKIP {track['title']} — {plan['reason']}")
+            stats["skipped"] += 1
+            continue
+        if plan["status"] == "error":
+            print(f"{prefix} ERROR {track['title']} — {plan['reason']}")
             stats["errors"] += 1
             continue
-        if grid is None or not grid["beats"]:
-            print(f"{prefix} SKIP {track['title']} — "
-                  f"{(grid or {}).get('note') or 'no beat grid'}")
-            stats["skipped"] += 1
-            continue
-        downbeats, beats = grid["downbeats"], grid["beats"]
-        samples_per_beat = grid["samples_per_beat"]
-        total_samples = grid.get("total_samples")
 
-        cue_data = decode_quick_cues(existing_cues_blob)
-
-        picked = pick_anchor(
-            args.anchor, main_cue=get_main_cue(cue_data),
-            downbeats=downbeats, beats=beats,
-            samples_per_beat=samples_per_beat, sample_rate=sample_rate,
-            detect_first_downbeat=_ai_detector(audio_path),
-            grid_anchor=grid.get("first_downbeat"))
-        anchor = picked["anchor"]
-        if anchor is None:
-            print(f"{prefix} SKIP {track['title']} — no usable bar-1 anchor "
-                  f"({picked['note'] or 'no main cue, AI result, or grid'})")
-            stats["skipped"] += 1
-            continue
-
-        result = None
-
-        if needs_analysis:
-            if audio_path is None:
-                print(f"{prefix} ERROR {track['title']} — audio file not found")
-                stats["errors"] += 1
-                continue
-
-            print(f"{prefix} Analyzing {track['title']} "
-                  f"({_describe_grid(grid)}; "
-                  f"{_describe_anchor(picked, sample_rate)})...",
-                  end="", flush=True)
-
-            try:
-                result = analyze_structure(str(audio_path), **analysis_params)
-            except Exception as e:
-                print(f" ERROR: {e}")
-                stats["errors"] += 1
-                continue
-
-            analysis_sr = result["sample_rate"]
-            sr_scale = sample_rate / analysis_sr if analysis_sr != sample_rate else 1.0
-        else:
-            print(f"{prefix} {track['title']} "
-                  f"({_describe_grid(grid)}; "
-                  f"{_describe_anchor(picked, sample_rate)})...",
-                  end="", flush=True)
-
-        proposed = []
-        track_low_conf = False
-
-        for slot_key, cue_def in sorted(template_cues.items(),
-                                        key=lambda x: int(x[0])):
-            slot = int(slot_key)
-            cue_index = slot - 1
-            detect_key = cue_def["detect"]
-            label = cue_def.get("label", "")
-            color_name = cue_def.get("color",
-                                     DEFAULT_CUE_COLORS.get(slot, "yellow"))
-            is_optional = cue_def.get("optional", False)
-
-            bar_result = resolve_bar_position(
-                detect_key, anchor, samples_per_beat, beats,
-                beat_offset=args.beat_offset)
-            if bar_result is not None:
-                position_samples, confidence = bar_result
-                if position_samples is None:
-                    print(f" [cue {slot}: {detect_key} unresolved]", end="")
-                    continue
-                if total_samples and position_samples >= total_samples:
-                    print(f" [cue {slot}: {detect_key} past track end]", end="")
-                    continue
-            else:
-                if result is None:
-                    continue
-                raw_pos = result["positions"].get(detect_key)
-                confidence = result["confidences"].get(detect_key, 0.0)
-
-                if raw_pos is None:
-                    continue
-
-                position_samples = raw_pos * sr_scale
-                if downbeats:
-                    position_samples = snap_to_downbeat(position_samples,
-                                                        downbeats)
-
-            existing = cue_data["cues"][cue_index]
-            if is_cue_active(existing) and not args.overwrite:
-                continue
-
-            if confidence < 0.4:
-                track_low_conf = True
-
-            color_a, color_r, color_g, color_b = ENGINE_COLORS[
-                color_name.lower()
-            ]
-            proposed.append({
-                "index": cue_index,
-                "label": label,
-                "position_samples": position_samples,
-                "color_a": color_a,
-                "color_r": color_r,
-                "color_g": color_g,
-                "color_b": color_b,
-            })
-
-        if not proposed:
-            print(" no cues to set")
-            continue
-
-        if track_low_conf:
-            stats["low_confidence"].append(track["title"])
+        grid, picked, proposed = plan["grid"], plan["anchor"], plan["proposed"]
+        print(f"{prefix} {track['title']} ({_describe_grid(grid)}; "
+              f"{_describe_anchor(picked, sample_rate)})...", end="", flush=True)
+        for f in plan["flags"]:
+            print(f" [{f}]", end="")
+        if plan["needs_review"]:
+            stats["review"].append(track["title"])
 
         if args.dry_run:
             print(f" {len(proposed)} cues proposed")
         else:
-            for p in proposed:
-                cue_data["cues"][p["index"]] = p
-
-            new_blob = encode_quick_cues(cue_data)
+            cue_data = apply_cues_to_blob(
+                decode_quick_cues(track["quick_cues_blob"]), proposed, sample_rate)
             wdb = open_library(args.db, readonly=False)
-            write_quick_cues(wdb, track["id"], new_blob)
+            write_quick_cues(wdb, track["id"], encode_quick_cues(cue_data))
             msg = f" {len(proposed)} cues written"
             if args.write_grid and grid["source"] == "ai":
                 bd = engine_beat_data_from_grid(grid, track["beat_data_blob"])
@@ -798,6 +673,19 @@ def cmd_batch(args):
                 stats["grids_written"] += 1
                 msg += " + grid"
             wdb.close()
+            if rb_xml and audio_path is not None:
+                from autocue.exporters import rekordbox
+                rekordbox.write_cues(
+                    rb_xml, str(audio_path),
+                    [{"num": p["slot"], "seconds": p["time_seconds"],
+                      "name": p["label"], "color": ENGINE_COLORS[p["color_name"]][1:]}
+                     for p in proposed],
+                    title=track["title"], artist=track["artist"],
+                    bpm=grid["tempo_bpm"], duration_seconds=plan["duration"],
+                    grid={"first_beat_seconds": picked["anchor"] / sample_rate,
+                          "bpm": grid["tempo_bpm"]},
+                    make_backup=False)
+                msg += " + rekordbox"
             print(msg)
             stats["cues_written"] += len(proposed)
 
@@ -823,10 +711,12 @@ def cmd_batch(args):
     if stats["anchors"]:
         print("Bar-1 anchors: " + ", ".join(
             f"{k} {v}" for k, v in stats["anchors"].items()))
-    if stats["low_confidence"]:
-        print(f"\nLow-confidence tracks (review manually):")
-        for t in stats["low_confidence"]:
+    if stats["review"]:
+        print(f"\nTracks to review ({len(stats['review'])}) — "
+              f"open them in the cue editor:")
+        for t in stats["review"]:
             print(f"  - {t}")
+
 
 
 def _add_grid_and_phrase_args(p):
@@ -842,6 +732,14 @@ def _add_grid_and_phrase_args(p):
                         "BARS bars (e.g. 16). Overrides --template.")
     p.add_argument("--phrase-cues", type=int, default=6, metavar="N",
                    help="How many cues --phrase places, 1-8 (default: 6)")
+    p.add_argument("--intro-bars", type=int, default=0, metavar="BARS",
+                   help="The edit opens with an intro this long: cue 1 stays on "
+                        "bar 1, cue 2 goes right after the intro and phrases "
+                        "count from there")
+    p.add_argument("--rekordbox-xml", default=None, metavar="PATH",
+                   help="Also export cues to this rekordbox XML collection "
+                        "(import it in rekordbox via Preferences > Advanced > "
+                        "Database > rekordbox xml)")
 
 
 def main():
@@ -926,6 +824,9 @@ def main():
     p_serve.add_argument("--port", type=int, default=5555, help="Port (default: 5555)")
     p_serve.add_argument("--vdj-db", default=None,
                          help="Path to VirtualDJ database.xml (default: auto-detect)")
+    p_serve.add_argument("--rekordbox-xml", default=None,
+                         help="rekordbox XML collection to export to "
+                              "(default: <Engine Library>/autocue_rekordbox.xml)")
     p_serve.set_defaults(func=cmd_serve)
 
     p_batch = sub.add_parser("batch",

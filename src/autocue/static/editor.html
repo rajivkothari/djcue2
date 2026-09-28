@@ -46,7 +46,7 @@
   #waveform ::part(marker) { width: 3px !important; cursor: ew-resize; }
   #waveform ::part(region-content), #waveform ::part(marker-content) { font-size: 10px; font-weight: 700; padding: 1px 4px; border-radius: 2px; color: #000; margin-top: 2px; white-space: nowrap; }
   .transport { display: flex; gap: 8px; align-items: center; margin-top: 8px; flex-wrap: wrap; font-size: 13px; color: var(--fg2); }
-  .transport input[type=range] { width: 160px; accent-color: var(--accent); }
+  .transport input[type=range] { width: 140px; accent-color: var(--accent); }
 
   .panel { background: var(--bg2); border: 1px solid var(--border); border-radius: 6px; padding: 12px; margin-bottom: 12px; }
   .panel h3 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--fg2); margin-bottom: 8px; }
@@ -80,6 +80,10 @@
   .spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid var(--fg2); border-top-color: transparent; border-radius: 50%; animation: spin .8s linear infinite; vertical-align: -2px; margin-right: 6px; }
   @keyframes spin { to { transform: rotate(360deg); } }
   kbd { background: var(--bg3); border: 1px solid var(--border); border-radius: 3px; padding: 0 5px; font-size: 11px; }
+  .pill { display: inline-block; padding: 1px 7px; border-radius: 9px; font-size: 11px; background: var(--bg3); }
+  .pill.ok { background: #1f4d3f; color: var(--success); } .pill.review { background: #4d3a1f; color: var(--warning); }
+  .pill.skip { background: var(--bg3); color: var(--fg2); } .pill.error { background: #4d1f2a; color: var(--accent); }
+  #batch-rows tr.link td.title { cursor: pointer; text-decoration: underline dotted; }
 </style>
 </head>
 <body>
@@ -98,7 +102,7 @@
   </div>
 
   <div class="content" id="content">
-    <div class="empty" id="empty">Pick a track from your library to begin.<br><span class="hint">Green dot = already has hot cues in Engine DJ.</span></div>
+    <div class="empty" id="empty">Pick a track from your library to begin, or run a <a href="#batch-panel" style="color:var(--fg)" onclick="showBatch()">batch</a>.<br><span class="hint">Green dot = already has hot cues in Engine DJ.</span></div>
 
     <div id="editor" style="display:none;">
       <div class="track-info">
@@ -110,9 +114,10 @@
       <div class="transport">
         <button class="btn sm" id="play-btn" onclick="togglePlay()">&#9654; Play</button>
         <span id="clock">0:00.000</span>
+        <button class="btn sm" id="click-btn" onclick="toggleClick()" title="Metronome click on the current grid while playing (accent on bar 1s)">&#9835; Click</button>
         <span>Zoom</span><input type="range" id="zoom" min="1" max="400" value="1" oninput="ws && ws.zoom(+this.value)" title="Whole track fits the window at the left; drag right to zoom in">
         <button class="btn sm" onclick="fitWaveform()" title="Show the whole track">Fit</button>
-        <span class="hint">Drag any marker to move it. <kbd>Space</kbd> play/pause · <kbd>B</kbd> set bar 1 at playhead</span>
+        <span class="hint">Drag any marker to move it. <kbd>Space</kbd> play/pause · <kbd>B</kbd> set bar 1 at playhead · <kbd>T</kbd> tap tempo · <kbd>C</kbd> click</span>
       </div>
 
       <div class="panel">
@@ -121,6 +126,11 @@
           <span class="hint">Grid</span>
           <button class="btn" id="grid-engine" onclick="useGrid('engine')" title="Engine DJ's stored beat grid">Engine DJ</button>
           <button class="btn" id="grid-ai" onclick="useGrid('ai')" title="Detect beats and downbeats from the audio and fit a fresh grid">AI (Beat This!)</button>
+          <button class="btn" id="grid-custom" onclick="useGrid('custom')" title="Tempo you set by tapping or with x2 / /2" style="display:none">Custom</button>
+          <span style="width:8px"></span>
+          <button class="btn sm" id="tap-btn" onclick="tap()" title="Tap along on the beat (at least 4 taps)">Tap</button>
+          <button class="btn sm" onclick="scaleTempo(2)" title="Grid is at half speed">&times;2</button>
+          <button class="btn sm" onclick="scaleTempo(0.5)" title="Grid is at double speed">&divide;2</button>
           <span class="hint" id="grid-info"></span>
         </div>
         <div class="row">
@@ -136,7 +146,7 @@
           <button class="btn sm" onclick="nudge(-1)" title="one beat earlier">&lsaquo; beat</button>
           <button class="btn sm" onclick="nudge(1)" title="one beat later">beat &rsaquo;</button>
           <button class="btn sm" onclick="nudge(4)" title="one bar later">bar &raquo;</button>
-          <button class="btn sm" onclick="previewAt(anchor)" title="play 8 seconds from bar 1">&#9654; from bar 1</button>
+          <button class="btn sm" onclick="previewAt(anchor)" title="play 8 seconds from bar 1 (turn on Click to check the grid)">&#9654; from bar 1</button>
           <label class="chk" style="margin-left:auto"><input type="checkbox" id="snap" checked> Snap to grid beats</label>
         </div>
         <div class="status" id="anchor-status"></div>
@@ -147,6 +157,7 @@
         <div class="row">
           <select id="template" onchange="onTemplateChange()"></select>
           <label class="chk" id="phrase-count-wrap" style="display:none">&times; <input type="number" id="phrase-cues" min="1" max="8" value="6" style="width:52px"> cues</label>
+          <label class="chk" title="The edit opens with an intro this long. Cue 1 stays on bar 1; cue 2 goes to the first bar after the intro and the phrases count from there.">Intro <input type="number" id="intro-bars" min="0" max="256" value="0" style="width:56px"> bars</label>
           <button class="btn primary" id="gen-btn" onclick="generate()">Generate cues from bar 1</button>
           <button class="btn" onclick="reloadExisting()" title="Discard edits and show the cues currently in Engine DJ">Reload existing</button>
           <button class="btn" onclick="addCueAtPlayhead()">+ Add cue at playhead</button>
@@ -164,12 +175,43 @@
           <label class="chk"><input type="checkbox" id="tgt-engine" checked> Engine DJ <span class="hint">(library database)</span></label>
           <label class="chk"><input type="checkbox" id="tgt-serato" checked> Serato <span class="hint">(tags in the audio file · also imported by djay Pro)</span></label>
           <label class="chk"><input type="checkbox" id="tgt-vdj"> VirtualDJ <span class="hint" id="vdj-hint">(database.xml)</span></label>
-          <button class="btn success" id="save-btn" onclick="save()" style="margin-left:auto">Save cues</button>
+          <label class="chk"><input type="checkbox" id="tgt-rb"> rekordbox <span class="hint" id="rb-hint" title="Import in rekordbox: Preferences > Advanced > Database > rekordbox xml, then drag from the rekordbox xml node">(XML collection)</span></label>
+          <button class="btn" id="undo-btn" onclick="undoSave()" style="margin-left:auto; display:none" title="Put every target back the way it was before the last save">&#8630; Undo last save</button>
+          <button class="btn success" id="save-btn" onclick="save()">Save cues</button>
         </div>
         <div class="row" id="tgt-grid-wrap" style="display:none; margin-top:6px;">
-          <label class="chk"><input type="checkbox" id="tgt-grid"> Also replace Engine DJ's beat grid with the AI grid <span class="hint">(experimental · backed up · check sync in Engine afterwards)</span></label>
+          <label class="chk"><input type="checkbox" id="tgt-grid"> Also replace Engine DJ's beat grid with this grid <span class="hint">(experimental · backed up · check sync in Engine afterwards)</span></label>
         </div>
         <div class="results" id="save-results"></div>
+      </div>
+    </div>
+
+    <div class="panel" id="batch-panel">
+      <h3>Batch — a whole playlist or crate</h3>
+      <div class="row">
+        <select id="b-type" onchange="fillBatchNames()"><option value="playlist">Playlist</option><option value="crate">Crate</option></select>
+        <select id="b-name" style="min-width:200px"></select>
+        <select id="b-template" onchange="onBatchTemplateChange()"></select>
+        <label class="chk" id="b-count-wrap" style="display:none">&times; <input type="number" id="b-cues" min="1" max="8" value="6" style="width:52px"> cues</label>
+        <label class="chk">Intro <input type="number" id="b-intro" min="0" max="256" value="0" style="width:56px"> bars</label>
+        <label class="chk" title="Grid: Engine's when the track has one, otherwise AI"><input type="checkbox" id="b-ai" checked> AI grid when Engine has none</label>
+        <label class="chk"><input type="checkbox" id="b-overwrite"> Overwrite existing cues</label>
+        <button class="btn primary" id="b-run" onclick="runBatch()">Preview batch</button>
+        <button class="btn" id="b-cancel" onclick="cancelBatch()" style="display:none">Stop</button>
+      </div>
+      <div class="status" id="b-status">Plans every track without writing anything. You then pick which to apply; tracks with <span class="pill review">review</span> deserve a look in the editor first.</div>
+      <div id="b-results" style="display:none">
+        <div class="row" style="margin:6px 0">
+          <button class="btn sm" onclick="selectBatch('clean')">Select clean</button>
+          <button class="btn sm" onclick="selectBatch('ok')">Select all OK</button>
+          <button class="btn sm" onclick="selectBatch('none')">Select none</button>
+          <span class="hint">Applies to the targets ticked in Step 3.</span>
+          <button class="btn success" id="b-apply" onclick="applyBatch()" style="margin-left:auto">Apply selected</button>
+        </div>
+        <table>
+          <thead><tr><th></th><th>Track</th><th>Status</th><th>Grid</th><th>Bar 1</th><th>Cues</th><th>Notes</th></tr></thead>
+          <tbody id="batch-rows"></tbody>
+        </table>
       </div>
     </div>
   </div>
@@ -179,12 +221,14 @@
 let ws = null, regions = null, track = null, cues = [], anchor = null;
 let colors = {}, setMode = false, previewTimer = null, libraryTimer = null;
 let ai = { seconds: null };
-let gridSource = 'engine', engineGrid = null, aiGrid = null, templates = [];
+let gridSource = 'engine', engineGrid = null, aiGrid = null, customGrid = null, templates = [];
+let playlists = [], crates = [], batchJob = null, batchPoll = null;
 
 const $ = id => document.getElementById(id);
 const esc = s => { const d = document.createElement('div'); d.textContent = s ?? ''; return d.innerHTML; };
 const fmt = t => { if (t == null || isNaN(t)) return '—'; const m = Math.floor(t / 60), s = t - m * 60; return `${m}:${s.toFixed(3).padStart(6, '0')}`; };
 const snapOn = () => $('snap').checked;
+const trackDuration = () => (ws && ws.getDuration()) || (track && track.duration) || 0;
 
 function nearestBeat(t) {
   if (!track || !track.beats.length) return t;
@@ -201,15 +245,24 @@ async function init() {
     $('schema-badge').textContent = `Schema ${s.version || s.error}`;
     colors = await (await fetch('/api/colors')).json();
     templates = await (await fetch('/api/templates')).json();
-    for (const t of templates) { const o = document.createElement('option'); o.value = t.id; o.textContent = t.name; $('template').appendChild(o); }
-    onTemplateChange();
+    for (const sel of [$('template'), $('b-template')]) {
+      for (const t of templates) { const o = document.createElement('option'); o.value = t.id; o.textContent = t.name; sel.appendChild(o); }
+    }
+    onTemplateChange(); onBatchTemplateChange();
+    playlists = await (await fetch('/api/playlists')).json();
+    crates = await (await fetch('/api/crates')).json();
+    if (!Array.isArray(playlists)) playlists = []; if (!Array.isArray(crates)) crates = [];
+    fillBatchNames();
   } catch (e) { $('schema-badge').textContent = 'Connection error'; }
   loadLibrary('');
   $('search').addEventListener('input', e => { clearTimeout(libraryTimer); libraryTimer = setTimeout(() => loadLibrary(e.target.value), 250); });
   document.addEventListener('keydown', e => {
     if (['INPUT', 'SELECT', 'TEXTAREA'].includes(e.target.tagName)) return;
     if (e.code === 'Space') { e.preventDefault(); togglePlay(); }
+    if (!track) return;
     if (e.key === 'b' || e.key === 'B') { if (ws) setAnchor(ws.getCurrentTime()); }
+    if (e.key === 't' || e.key === 'T') tap();
+    if (e.key === 'c' || e.key === 'C') toggleClick();
   });
 }
 
@@ -234,7 +287,8 @@ async function selectTrack(id) {
   const r = await fetch(`/api/track/${id}`);
   const data = await r.json();
   if (data.error) { alert(data.error); return; }
-  track = data; ai = { seconds: null }; aiGrid = null;
+  stopClick();
+  track = data; ai = { seconds: null }; aiGrid = null; customGrid = null; taps = [];
   engineGrid = track.beats.length ? { beats: track.beats, downbeats: track.downbeats, seconds_per_beat: track.seconds_per_beat,
     tempo_bpm: track.seconds_per_beat ? 60 / track.seconds_per_beat : track.bpm, first_downbeat_seconds: track.grid_first_downbeat_seconds } : null;
   gridSource = engineGrid ? 'engine' : 'ai';
@@ -248,67 +302,19 @@ async function selectTrack(id) {
   $('tgt-serato').disabled = !track.serato_supported; if (!track.serato_supported) $('tgt-serato').checked = false;
   $('tgt-vdj').disabled = !track.vdj_available;
   $('vdj-hint').textContent = track.vdj_available ? '(database.xml found)' : '(database.xml not found)';
+  $('rb-hint').textContent = `(${track.rekordbox_path.split(/[\\/]/).pop()})`;
   $('tgt-engine').disabled = !track.has_quick_cues;
+  $('undo-btn').style.display = track.can_undo ? '' : 'none';
 
   cues = track.cues.map(c => ({ slot: c.slot, label: c.label, color_name: c.color_name || 'yellow', time: c.time_seconds }));
   anchor = track.main_cue_seconds ?? track.grid_first_downbeat_seconds ?? null;
   $('anchor-status').innerHTML = anchor == null ? '<span class="warn">No main cue or grid — set bar 1 manually.</span>'
-    : `Starting from ${track.main_cue_seconds != null ? '<b>main cue</b>' : '<b>Engine grid</b>'}. Check it against the audio, then generate.`;
+    : `Starting from ${track.main_cue_seconds != null ? '<b>main cue</b>' : '<b>Engine grid</b>'}. Check it against the audio (turn on <b>&#9835; Click</b>), then generate.`;
 
   renderTable(); updateAnchorUI(); renderGridUI();
   try { loadWaveform(); }
   catch (e) { $('anchor-status').innerHTML = `<span class="err">Waveform unavailable: ${esc(String(e))}. You can still edit times in the table.</span>`; }
   if (!engineGrid) detectGrid();      // no Engine grid: build one from the audio
-}
-
-// ---------------------------------------------------------------- beat grid
-function renderGridUI() {
-  $('grid-engine').classList.toggle('on', gridSource === 'engine');
-  $('grid-ai').classList.toggle('on', gridSource === 'ai');
-  $('grid-engine').disabled = !engineGrid;
-  $('tgt-grid-wrap').style.display = gridSource === 'ai' && aiGrid ? '' : 'none';
-  if (gridSource === 'ai' && aiGrid) {
-    let s = `AI · ${aiGrid.tempo_bpm.toFixed(2)} BPM · first beat ${fmt(aiGrid.first_downbeat_seconds)} · ${aiGrid.n_detected} beats heard`;
-    if (aiGrid.note) s += ` <span class="warn">— ${esc(aiGrid.note)}</span>`;
-    $('grid-info').innerHTML = s;
-  } else if (engineGrid) {
-    $('grid-info').innerHTML = `Engine DJ · ${engineGrid.tempo_bpm.toFixed(2)} BPM · ${engineGrid.beats.length} beats`;
-  } else {
-    $('grid-info').innerHTML = '<span class="warn">No Engine DJ beat grid for this track.</span>';
-  }
-}
-function applyGrid(g) {
-  track.beats = g.beats; track.downbeats = g.downbeats; track.seconds_per_beat = g.seconds_per_beat;
-  // Keep the DJ's own main cue as bar 1 (re-snapped); otherwise take the grid's bar 1.
-  if (track.main_cue_seconds != null && anchor != null) anchor = maybeSnap(anchor);
-  else if (g.first_downbeat_seconds != null) anchor = maybeSnap(g.first_downbeat_seconds);
-  renderMarkers(); updateAnchorUI(); renderGridUI();
-}
-function useGrid(src) {
-  if (src === 'ai') { if (!aiGrid) return detectGrid(); gridSource = 'ai'; applyGrid(aiGrid); }
-  else if (engineGrid) { gridSource = 'engine'; applyGrid(engineGrid); }
-}
-async function detectGrid() {
-  $('grid-ai').disabled = true;
-  $('grid-info').innerHTML = '<span class="spinner"></span>Listening to the track (about 10 s)…';
-  try {
-    const r = await (await fetch(`/api/track/${track.id}/grid?source=ai`)).json();
-    if (r.error) { $('grid-info').innerHTML = `<span class="err">${esc(r.error)}</span>`; return; }
-    aiGrid = r; gridSource = 'ai'; applyGrid(aiGrid);
-    $('anchor-status').innerHTML = `Bar 1 from the AI grid${track.main_cue_seconds != null ? ' (kept your main cue, snapped to the new grid)' : ''}. Listen with <b>&#9654; from bar 1</b>, nudge if needed, then generate.`;
-  } catch (e) { $('grid-info').innerHTML = `<span class="err">${esc(String(e))}</span>`; }
-  finally { $('grid-ai').disabled = false; }
-}
-function onTemplateChange() {
-  const sel = $('template').value;
-  $('phrase-count-wrap').style.display = sel.startsWith('phrase-') ? '' : 'none';
-}
-function currentTemplateId() {
-  const sel = $('template').value;
-  if (!sel.startsWith('phrase-')) return sel;
-  const bars = sel.split('-')[1];
-  const n = Math.min(8, Math.max(1, parseInt($('phrase-cues').value, 10) || 6));
-  return `phrase-${bars}-${n}`;
 }
 
 function loadWaveform() {
@@ -321,9 +327,10 @@ function loadWaveform() {
   regions = ws.registerPlugin(WaveSurfer.Regions.create());
   ws.on('ready', () => { fitWaveform(); renderMarkers(); });
   ws.on('timeupdate', t => { $('clock').textContent = fmt(t); });
-  ws.on('play', () => $('play-btn').innerHTML = '&#10074;&#10074; Pause');
-  ws.on('pause', () => $('play-btn').innerHTML = '&#9654; Play');
-  ws.on('interaction', t => { if (setMode) { setAnchor(t); toggleSetMode(false); } });
+  ws.on('play', () => { $('play-btn').innerHTML = '&#10074;&#10074; Pause'; startClickScheduler(); });
+  ws.on('pause', () => { $('play-btn').innerHTML = '&#9654; Play'; stopClickScheduler(); });
+  ws.on('seeking', () => { clickScheduledUntil = null; });
+  ws.on('interaction', t => { clickScheduledUntil = null; if (setMode) { setAnchor(t); toggleSetMode(false); } });
   ws.on('error', e => { $('anchor-status').innerHTML = `<span class="err">Audio load error: ${esc(String(e))}</span>`; });
   regions.on('region-updated', region => {
     if (region.id === 'anchor') { anchor = maybeSnap(region.start); if (anchor !== region.start) region.setOptions({ start: anchor }); updateAnchorUI(); return; }
@@ -342,8 +349,6 @@ function renderMarkers() {
   if (!regions || !ws || !ws.getDuration()) return;
   regions.clearRegions();
   if (anchor != null) {
-    // Cue 1 normally sits exactly on bar 1, so pin this flag to the bottom
-    // edge to keep both labels readable.
     const flag = document.createElement('span');
     flag.textContent = 'BAR 1';
     flag.style.cssText = 'position:absolute;bottom:2px;left:2px;font:700 10px sans-serif;background:#fff;color:#000;padding:1px 4px;border-radius:2px;white-space:nowrap;';
@@ -355,12 +360,126 @@ function renderMarkers() {
   }
 }
 
+// ---------------------------------------------------------------- beat grid
+function currentGrid() { return gridSource === 'ai' ? aiGrid : gridSource === 'custom' ? customGrid : engineGrid; }
+function renderGridUI() {
+  $('grid-engine').classList.toggle('on', gridSource === 'engine');
+  $('grid-ai').classList.toggle('on', gridSource === 'ai');
+  $('grid-custom').classList.toggle('on', gridSource === 'custom');
+  $('grid-custom').style.display = customGrid ? '' : 'none';
+  $('grid-engine').disabled = !engineGrid;
+  $('tgt-grid-wrap').style.display = (gridSource === 'ai' && aiGrid) || (gridSource === 'custom' && customGrid) ? '' : 'none';
+  if (gridSource === 'ai' && aiGrid) {
+    let s = `AI · ${aiGrid.tempo_bpm.toFixed(2)} BPM · first beat ${fmt(aiGrid.first_downbeat_seconds)} · ${aiGrid.n_detected} beats heard`;
+    if (aiGrid.note) s += ` <span class="warn">— ${esc(aiGrid.note)}</span>`;
+    $('grid-info').innerHTML = s;
+  } else if (gridSource === 'custom' && customGrid) {
+    $('grid-info').innerHTML = `Custom · ${customGrid.tempo_bpm.toFixed(2)} BPM (${esc(customGrid.origin)}) · bar 1 ${fmt(anchor)}`;
+  } else if (engineGrid) {
+    $('grid-info').innerHTML = `Engine DJ · ${engineGrid.tempo_bpm.toFixed(2)} BPM · ${engineGrid.beats.length} beats`;
+  } else {
+    $('grid-info').innerHTML = '<span class="warn">No Engine DJ beat grid for this track.</span>';
+  }
+}
+function applyGrid(g) {
+  track.beats = g.beats; track.downbeats = g.downbeats; track.seconds_per_beat = g.seconds_per_beat;
+  // Keep the DJ's own main cue as bar 1 (re-snapped); otherwise take the grid's bar 1.
+  if (track.main_cue_seconds != null && anchor != null) anchor = maybeSnap(anchor);
+  else if (g.first_downbeat_seconds != null) anchor = maybeSnap(g.first_downbeat_seconds);
+  clickScheduledUntil = null;
+  renderMarkers(); updateAnchorUI(); renderGridUI();
+}
+function useGrid(src) {
+  if (src === 'ai') { if (!aiGrid) return detectGrid(); gridSource = 'ai'; applyGrid(aiGrid); }
+  else if (src === 'custom' && customGrid) { gridSource = 'custom'; applyGrid(customGrid); }
+  else if (engineGrid) { gridSource = 'engine'; applyGrid(engineGrid); }
+}
+async function detectGrid() {
+  $('grid-ai').disabled = true;
+  $('grid-info').innerHTML = '<span class="spinner"></span>Listening to the track (about 10 s)…';
+  try {
+    const r = await (await fetch(`/api/track/${track.id}/grid?source=ai`)).json();
+    if (r.error) { $('grid-info').innerHTML = `<span class="err">${esc(r.error)}</span>`; return; }
+    aiGrid = r; gridSource = 'ai'; applyGrid(aiGrid);
+    $('anchor-status').innerHTML = `Bar 1 from the AI grid${track.main_cue_seconds != null ? ' (kept your main cue, snapped to the new grid)' : ''}. Listen with <b>&#9654; from bar 1</b> and <b>&#9835; Click</b>, nudge if needed, then generate.`;
+  } catch (e) { $('grid-info').innerHTML = `<span class="err">${esc(String(e))}</span>`; }
+  finally { $('grid-ai').disabled = false; }
+}
+
+// custom tempo: tap, x2, /2 — beats laid out from bar 1 at that tempo
+function setCustomTempo(bpm, origin) {
+  if (!track || !bpm || bpm < 40 || bpm > 300) return;
+  const spb = 60 / bpm, dur = trackDuration() || 600;
+  const a = anchor ?? track.main_cue_seconds ?? track.grid_first_downbeat_seconds ?? 0;
+  const kmin = Math.ceil(-a / spb), kmax = Math.floor((dur - a) / spb);
+  const beats = [], downbeats = [];
+  for (let k = kmin; k <= kmax; k++) { const t = a + k * spb; beats.push(t); if (((k % 4) + 4) % 4 === 0) downbeats.push(t); }
+  customGrid = { beats, downbeats, seconds_per_beat: spb, tempo_bpm: bpm, first_downbeat_seconds: a, origin };
+  const was = $('snap').checked; $('snap').checked = false;   // keep bar 1 exactly where it is
+  gridSource = 'custom'; applyGrid(customGrid);
+  $('snap').checked = was;
+}
+function scaleTempo(f) {
+  const g = currentGrid(); if (!g) return;
+  setCustomTempo(g.tempo_bpm * f, f > 1 ? '×2' : '÷2');
+}
+let taps = [];
+function tap() {
+  const now = performance.now();
+  if (taps.length && now - taps[taps.length - 1] > 2000) taps = [];
+  taps.push(now); if (taps.length > 12) taps.shift();
+  $('tap-btn').classList.add('on'); setTimeout(() => $('tap-btn').classList.remove('on'), 120);
+  if (taps.length < 4) { $('grid-info').innerHTML = `Tap… ${taps.length}/4`; return; }
+  const gaps = []; for (let i = 1; i < taps.length; i++) gaps.push(taps[i] - taps[i - 1]);
+  gaps.sort((a, b) => a - b);
+  const median = gaps[Math.floor(gaps.length / 2)];
+  setCustomTempo(Math.round(60000 / median * 100) / 100, `tapped ${taps.length}`);
+}
+
+// ---------------------------------------------------------------- metronome
+let audioCtx = null, clickOn = false, clickRaf = null, clickScheduledUntil = null;
+function toggleClick() {
+  clickOn = !clickOn;
+  $('click-btn').classList.toggle('on', clickOn);
+  if (clickOn) { if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)(); audioCtx.resume(); if (ws && ws.isPlaying()) startClickScheduler(); }
+  else stopClickScheduler();
+}
+function stopClick() { if (clickOn) toggleClick(); }
+function scheduleClick(atCtxTime, accent) {
+  const osc = audioCtx.createOscillator(), gain = audioCtx.createGain();
+  osc.frequency.value = accent ? 1600 : 1000;
+  gain.gain.setValueAtTime(accent ? 0.5 : 0.28, atCtxTime);
+  gain.gain.exponentialRampToValueAtTime(0.001, atCtxTime + (accent ? 0.06 : 0.035));
+  osc.connect(gain).connect(audioCtx.destination);
+  osc.start(atCtxTime); osc.stop(atCtxTime + 0.08);
+}
+function startClickScheduler() {
+  if (!clickOn || !audioCtx || clickRaf) return;
+  clickScheduledUntil = null;
+  const tick = () => {
+    if (!clickOn || !ws || !ws.isPlaying()) { clickRaf = null; return; }
+    const now = ws.getCurrentTime(), horizon = now + 0.25;
+    const from = clickScheduledUntil == null ? now : clickScheduledUntil;
+    const spb = track.seconds_per_beat || 0.5, a = anchor ?? 0;
+    for (const b of track.beats) {
+      if (b <= from || b > horizon) continue;
+      const k = Math.round((b - a) / spb);
+      scheduleClick(audioCtx.currentTime + (b - now), ((k % 4) + 4) % 4 === 0);
+    }
+    clickScheduledUntil = horizon;
+    clickRaf = requestAnimationFrame(tick);
+  };
+  clickRaf = requestAnimationFrame(tick);
+}
+function stopClickScheduler() { if (clickRaf) cancelAnimationFrame(clickRaf); clickRaf = null; clickScheduledUntil = null; }
+
 // ---------------------------------------------------------------- bar 1
 function setAnchor(t) {
   if (t == null) return;
   anchor = Math.max(0, maybeSnap(t));
-  renderMarkers(); updateAnchorUI();
-  $('anchor-status').innerHTML = 'Bar 1 set. Listen with <b>&#9654; from bar 1</b>, nudge if needed, then generate.';
+  if (gridSource === 'custom' && customGrid) setCustomTempo(customGrid.tempo_bpm, customGrid.origin);
+  renderMarkers(); updateAnchorUI(); clickScheduledUntil = null;
+  $('anchor-status').innerHTML = 'Bar 1 set. Listen with <b>&#9654; from bar 1</b> and <b>&#9835; Click</b>, nudge if needed, then generate.';
 }
 function updateAnchorUI() { $('anchor-time').textContent = fmt(anchor); $('gen-btn').disabled = anchor == null; }
 function toggleSetMode(force) {
@@ -379,7 +498,8 @@ function nudge(beats) {
   const was = snapOn(); $('snap').checked = false;
   anchor = Math.max(0, anchor + beats * track.seconds_per_beat);
   $('snap').checked = was; if (was) anchor = nearestBeat(anchor);
-  renderMarkers(); updateAnchorUI();
+  if (gridSource === 'custom' && customGrid) setCustomTempo(customGrid.tempo_bpm, customGrid.origin);
+  renderMarkers(); updateAnchorUI(); clickScheduledUntil = null;
 }
 async function detectAI() {
   $('btn-ai').disabled = true;
@@ -400,12 +520,31 @@ async function detectAI() {
   finally { $('btn-ai').disabled = false; }
 }
 
+// ---------------------------------------------------------------- templates
+function onTemplateChange() { $('phrase-count-wrap').style.display = $('template').value.startsWith('phrase-') ? '' : 'none'; }
+function onBatchTemplateChange() { $('b-count-wrap').style.display = $('b-template').value.startsWith('phrase-') ? '' : 'none'; }
+function templateId(selId, countId) {
+  const sel = $(selId).value;
+  if (!sel.startsWith('phrase-')) return sel;
+  const bars = sel.split('-')[1];
+  const n = Math.min(8, Math.max(1, parseInt($(countId).value, 10) || 6));
+  return `phrase-${bars}-${n}`;
+}
+const currentTemplateId = () => templateId('template', 'phrase-cues');
+const introBars = () => Math.max(0, parseInt($('intro-bars').value, 10) || 0);
+function gridSpec() {
+  if (gridSource === 'ai' && aiGrid) return 'ai';
+  if (gridSource === 'custom' && customGrid) return { source: 'custom', seconds_per_beat: customGrid.seconds_per_beat, bar1_seconds: anchor, duration_seconds: trackDuration() };
+  return null;
+}
+
 // ---------------------------------------------------------------- cues
 async function generate() {
   if (anchor == null) return;
   $('gen-status').innerHTML = '<span class="spinner"></span>Generating…';
-  const r = await (await fetch('/api/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ track_id: track.id, template: currentTemplateId(), anchor_seconds: anchor, grid: gridSource }) })).json();
+  const body = { track_id: track.id, template: currentTemplateId(), anchor_seconds: anchor, grid: gridSource, intro_bars: introBars() };
+  if (gridSource === 'custom' && customGrid) { body.seconds_per_beat = customGrid.seconds_per_beat; body.duration_seconds = trackDuration(); }
+  const r = await (await fetch('/api/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })).json();
   if (r.error) { $('gen-status').innerHTML = `<span class="err">${esc(r.error)}</span>`; return; }
   cues = r.proposed.map(p => ({ slot: p.slot, label: p.label, color_name: p.color_name, time: p.time_seconds }));
   const dropped = r.unsupported.length ? ` <span class="warn">Skipped analysis-based ${esc(r.unsupported.join(', '))} — this editor is bar-based.</span>` : '';
@@ -454,7 +593,6 @@ function removeCue(slot) { cues = cues.filter(c => c.slot !== slot); renderTable
 
 // ---------------------------------------------------------------- transport
 function fitWaveform() {
-  // Whole track across the panel, so every generated cue is visible at once.
   if (!ws || !ws.getDuration()) return;
   const width = $('waveform').clientWidth || 1000;
   const pxPerSec = Math.max(1, Math.floor(width / ws.getDuration()));
@@ -465,29 +603,130 @@ function togglePlay() { if (ws) ws.playPause(); }
 function previewAt(t) {
   if (!ws || t == null) return;
   clearTimeout(previewTimer);
-  ws.setTime(t); ws.play();
+  ws.setTime(t); clickScheduledUntil = null; ws.play();
   previewTimer = setTimeout(() => ws.pause(), 8000);
 }
 
-// ---------------------------------------------------------------- save
+// ---------------------------------------------------------------- save / undo
+function targets() {
+  return { engine: $('tgt-engine').checked, serato: $('tgt-serato').checked, vdj: $('tgt-vdj').checked, rekordbox: $('tgt-rb').checked };
+}
+const TARGET_NAMES = { engine: 'Engine DJ', engine_grid: 'Engine DJ beat grid', serato: 'Serato / djay Pro (file tags)', vdj: 'VirtualDJ', rekordbox: 'rekordbox XML' };
+function renderResults(el, results, extra) {
+  el.innerHTML = Object.entries(results).map(([k, v]) =>
+    `<div><span class="${v.ok ? 'ok' : 'err'}">${v.ok ? '&#10003;' : '&#10007;'}</span> <b>${TARGET_NAMES[k] || k}</b>: ${esc(v.message)}${v.backup ? ` <span class="hint">backup: ${esc(v.backup)}</span>` : ''}</div>`).join('') + (extra || '');
+}
 async function save() {
-  const targets = { engine: $('tgt-engine').checked, serato: $('tgt-serato').checked, vdj: $('tgt-vdj').checked,
-                    engine_grid: gridSource === 'ai' && !!aiGrid && $('tgt-grid').checked };
-  if (!targets.engine && !targets.serato && !targets.vdj && !targets.engine_grid) { $('save-results').innerHTML = '<span class="warn">Pick at least one target.</span>'; return; }
+  const tg = targets();
+  tg.engine_grid = $('tgt-grid-wrap').style.display !== 'none' && $('tgt-grid').checked;
+  if (!Object.values(tg).some(Boolean)) { $('save-results').innerHTML = '<span class="warn">Pick at least one target.</span>'; return; }
   $('save-btn').disabled = true;
   $('save-results').innerHTML = '<span class="spinner"></span>Saving…';
   try {
     const r = await (await fetch('/api/save', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ track_id: track.id, targets, clear_missing: true,
+      body: JSON.stringify({ track_id: track.id, targets: tg, clear_missing: true, grid_spec: gridSpec(),
         cues: cues.map(c => ({ slot: c.slot, label: c.label, color_name: c.color_name, time_seconds: c.time })) }) })).json();
     if (r.error) { $('save-results').innerHTML = `<span class="err">${esc(r.error)}</span>`; return; }
-    const names = { engine: 'Engine DJ', serato: 'Serato / djay Pro (file tags)', vdj: 'VirtualDJ', engine_grid: 'Engine DJ beat grid' };
-    $('save-results').innerHTML = Object.entries(r.results).map(([k, v]) =>
-      `<div><span class="${v.ok ? 'ok' : 'err'}">${v.ok ? '&#10003;' : '&#10007;'}</span> <b>${names[k]}</b>: ${esc(v.message)}${v.backup ? ` <span class="hint">backup: ${esc(v.backup)}</span>` : ''}</div>`).join('')
-      + (targets.serato && r.results.serato?.ok ? '<div class="hint">djay Pro: re-import or re-analyze the track so it picks up the Serato cue tags.</div>' : '');
+    let extra = '';
+    if (tg.serato && r.results.serato?.ok) extra += '<div class="hint">djay Pro: re-import or re-analyze the track so it picks up the Serato cue tags.</div>';
+    if (tg.rekordbox && r.results.rekordbox?.ok) extra += `<div class="hint">rekordbox: Preferences ▸ Advanced ▸ Database ▸ rekordbox xml → ${esc(track.rekordbox_path)}, then drag the track from the <i>rekordbox xml</i> node.</div>`;
+    renderResults($('save-results'), r.results, extra);
+    if (Object.values(r.results).some(v => v.ok)) { track.can_undo = true; $('undo-btn').style.display = ''; }
     if (r.results.engine?.ok) { track.cues = cues.map(c => ({ slot: c.slot, label: c.label, color_name: c.color_name, color_hex: colors[c.color_name], time_seconds: c.time })); loadLibrary($('search').value); }
   } catch (e) { $('save-results').innerHTML = `<span class="err">${esc(String(e))}</span>`; }
   finally { $('save-btn').disabled = false; }
+}
+async function undoSave() {
+  if (!track) return;
+  $('undo-btn').disabled = true;
+  $('save-results').innerHTML = '<span class="spinner"></span>Restoring…';
+  try {
+    const r = await (await fetch(`/api/undo/${track.id}`, { method: 'POST' })).json();
+    if (r.error) { $('save-results').innerHTML = `<span class="err">${esc(r.error)}</span>`; return; }
+    renderResults($('save-results'), r.results, `<div class="hint">Restored the state from ${esc(r.restored_from || 'the last save')}.</div>`);
+    track.can_undo = r.can_undo; $('undo-btn').style.display = r.can_undo ? '' : 'none';
+    const id = track.id; await selectTrack(id);
+    $('save-results').innerHTML += '';
+  } catch (e) { $('save-results').innerHTML = `<span class="err">${esc(String(e))}</span>`; }
+  finally { $('undo-btn').disabled = false; }
+}
+
+// ---------------------------------------------------------------- batch
+function showBatch() { $('batch-panel').scrollIntoView({ behavior: 'smooth' }); }
+function fillBatchNames() {
+  const items = $('b-type').value === 'playlist' ? playlists : crates;
+  const sel = $('b-name'); sel.innerHTML = '';
+  for (const it of items) { const o = document.createElement('option'); o.value = it.title; o.textContent = `${it.title} (${it.track_count})`; sel.appendChild(o); }
+}
+async function runBatch() {
+  const name = $('b-name').value; if (!name) return;
+  $('b-run').disabled = true; $('b-cancel').style.display = '';
+  $('b-results').style.display = 'none'; $('batch-rows').innerHTML = '';
+  $('b-status').innerHTML = '<span class="spinner"></span>Planning…';
+  const body = { type: $('b-type').value, name, template: templateId('b-template', 'b-cues'),
+    intro_bars: Math.max(0, parseInt($('b-intro').value, 10) || 0), grid: $('b-ai').checked ? 'auto' : 'engine',
+    anchor: 'auto', overwrite: $('b-overwrite').checked, max_duration: 900 };
+  try {
+    const r = await (await fetch('/api/batch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })).json();
+    if (r.error) { $('b-status').innerHTML = `<span class="err">${esc(r.error)}</span>`; $('b-run').disabled = false; $('b-cancel').style.display = 'none'; return; }
+    batchJob = r; pollBatch();
+  } catch (e) { $('b-status').innerHTML = `<span class="err">${esc(String(e))}</span>`; $('b-run').disabled = false; }
+}
+async function pollBatch() {
+  const r = await (await fetch(`/api/batch/${batchJob.id}`)).json();
+  batchJob = r;
+  renderBatchRows();
+  if (!r.done) { $('b-status').innerHTML = `<span class="spinner"></span>Planning ${r.progress}/${r.total} of ${esc(r.source)}…`; batchPoll = setTimeout(pollBatch, 700); return; }
+  $('b-run').disabled = false; $('b-cancel').style.display = 'none';
+  if (r.error) { $('b-status').innerHTML = `<span class="err">${esc(r.error)}</span>`; return; }
+  const n = s => r.rows.filter(x => x.status === s).length, rev = r.rows.filter(x => x.status === 'ok' && x.needs_review).length;
+  $('b-status').innerHTML = `<b>${esc(r.template_name || '')}</b> on ${esc(r.source)}: <span class="ok">${n('ok') - rev} clean</span>, <span class="warn">${rev} to review</span>, ${n('skip')} skipped, ${n('error')} errors. Nothing written yet.`;
+  $('b-results').style.display = '';
+}
+function cancelBatch() { if (batchJob) fetch(`/api/batch/${batchJob.id}/cancel`, { method: 'POST' }); }
+function renderBatchRows() {
+  const tb = $('batch-rows'); tb.innerHTML = '';
+  for (const row of batchJob.rows) {
+    const tr = document.createElement('tr'); tr.className = 'link';
+    const cls = row.status !== 'ok' ? row.status : row.needs_review ? 'review' : 'ok';
+    const label = row.status !== 'ok' ? row.status : row.needs_review ? 'review' : 'ok';
+    const applied = row.applied ? ' ' + Object.entries(row.applied).map(([k, v]) => `<span class="${v.ok ? 'ok' : 'err'}" title="${esc(v.message)}">${v.ok ? '&#10003;' : '&#10007;'}${esc(TARGET_NAMES[k] || k)}</span>`).join(' ') : '';
+    tr.innerHTML = `
+      <td>${row.status === 'ok' && !row.applied ? `<input type="checkbox" class="b-pick" data-id="${row.track_id}" ${row.needs_review ? '' : 'checked'}>` : ''}</td>
+      <td class="title" onclick="selectTrack(${row.track_id}); window.scrollTo(0,0);">${esc(row.title)}<br><span class="hint">${esc(row.artist)}</span></td>
+      <td><span class="pill ${cls}">${label}</span>${applied}</td>
+      <td>${row.grid ? `${esc(row.grid)} ${row.tempo_bpm ? row.tempo_bpm.toFixed(1) : ''}` : ''}</td>
+      <td>${esc(row.anchor || '')}</td>
+      <td>${row.cues.map(c => `<span class="hint">${c.slot}@${c.time_display}</span>`).join(' ')}</td>
+      <td class="hint">${esc(row.reason || row.flags.join(' · '))}</td>`;
+    tb.appendChild(tr);
+  }
+}
+function selectBatch(which) {
+  for (const cb of document.querySelectorAll('.b-pick')) {
+    const row = batchJob.rows.find(r => r.track_id === +cb.dataset.id);
+    cb.checked = which === 'ok' ? true : which === 'clean' ? !row.needs_review : false;
+  }
+}
+async function applyBatch() {
+  const ids = [...document.querySelectorAll('.b-pick:checked')].map(cb => +cb.dataset.id);
+  if (!ids.length) { $('b-status').innerHTML = '<span class="warn">Nothing selected.</span>'; return; }
+  const tg = targets();
+  if (!Object.values(tg).some(Boolean)) { $('b-status').innerHTML = '<span class="warn">Tick at least one target in Step 3.</span>'; return; }
+  $('b-apply').disabled = true;
+  $('b-status').innerHTML = `<span class="spinner"></span>Writing ${ids.length} tracks…`;
+  try {
+    const r = await (await fetch(`/api/batch/${batchJob.id}/apply`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ track_ids: ids, targets: tg, clear_missing: false }) })).json();
+    if (r.error) { $('b-status').innerHTML = `<span class="err">${esc(r.error)}</span>`; return; }
+    for (const row of batchJob.rows) if (r.applied[row.track_id]) row.applied = r.applied[row.track_id];
+    renderBatchRows();
+    const okCount = Object.values(r.applied).filter(res => Object.values(res).every(v => v.ok)).length;
+    $('b-status').innerHTML = `<span class="ok">Applied to ${okCount} of ${r.count} tracks.</span> Each track can be undone from the editor.`;
+    loadLibrary($('search').value);
+    if (track && r.applied[track.id]) selectTrack(track.id);   // refresh the open track's cues + undo state
+  } catch (e) { $('b-status').innerHTML = `<span class="err">${esc(String(e))}</span>`; }
+  finally { $('b-apply').disabled = false; }
 }
 
 init();

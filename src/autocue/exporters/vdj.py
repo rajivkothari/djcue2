@@ -89,14 +89,15 @@ def backup_database(db_path: Path) -> Path:
 
 
 def write_cues(db_path, file_path: str, cues: list[dict],
-               make_backup: bool = True) -> dict:
+               make_backup: bool = True, replace_all: bool = False) -> dict:
     """Write hot cues for one track.
 
     cues: [{"num": 1-based slot, "seconds": float, "name": str,
             "color": (r, g, b)}]
-    Existing <Poi Type="cue"> elements for those slot numbers are replaced;
-    all other Poi (loops, beatgrid, other cue slots) are left alone. A
-    <Song> element is created if the track isn't in the database yet.
+    Existing <Poi Type="cue"> elements for those slot numbers are replaced
+    (every hot cue when replace_all); all other Poi (loops, beatgrid, other
+    cue slots) are left alone. A <Song> element is created if the track
+    isn't in the database yet.
 
     Returns {"written": n, "backup": path|None, "created_song": bool}.
     """
@@ -113,7 +114,7 @@ def write_cues(db_path, file_path: str, cues: list[dict],
     nums = {int(c["num"]) for c in cues}
     for poi in list(song.findall("Poi")):
         if poi.get("Type") == "cue" and poi.get("Num", "").isdigit() \
-                and int(poi.get("Num")) in nums:
+                and (replace_all or int(poi.get("Num")) in nums):
             song.remove(poi)
 
     for c in sorted(cues, key=lambda c: int(c["num"])):

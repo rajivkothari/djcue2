@@ -26,28 +26,67 @@ _PHRASE_COLORS = ["yellow", "orange", "purple", "red",
                   "green", "teal", "cyan", "blue"]
 
 
-def phrase_template(bars: int, count: int = DEFAULT_PHRASE_CUES) -> dict:
+def phrase_template(bars: int, count: int = DEFAULT_PHRASE_CUES,
+                    intro_bars: int = 0) -> dict:
     """A template that places cue k at bar 1 + (k-1)*bars.
 
     "Phrase-match" cueing: cue 1 is the first bar and every later cue is
     one phrase further on, so any two cues line up when mixing.
+
+    With intro_bars, the edit is assumed to open with an intro of that
+    length before its phrase structure starts: cue 1 stays on bar 1, cue 2
+    goes to the first bar after the intro, and phrases count from there.
     """
     if bars < 1 or bars > 128:
         raise ValueError("Phrase length must be 1–128 bars")
     if count < 1 or count > 8:
         raise ValueError("Cue count must be 1–8")
+    if intro_bars < 0 or intro_bars > 256:
+        raise ValueError("Intro length must be 0–256 bars")
     cues = {}
     for k in range(1, count + 1):
-        bar = 1 + (k - 1) * bars
+        if k == 1:
+            bar = 1
+        elif intro_bars:
+            bar = 1 + intro_bars + (k - 2) * bars
+        else:
+            bar = 1 + (k - 1) * bars
         cues[k] = {"detect": f"bar_{bar}",
                    "label": "Intro" if k == 1 else f"Bar {bar}",
                    "color": _PHRASE_COLORS[k - 1]}
+    name = f"Every {bars} bars"
+    if intro_bars:
+        name += f" after a {intro_bars}-bar intro"
     return {
-        "name": f"Every {bars} bars",
+        "name": name,
         "description": f"{count} cues, one every {bars} bars from cue 1",
         "phrase_bars": bars,
+        "intro_bars": intro_bars,
         "cues": cues,
     }
+
+
+def with_intro(template: dict, intro_bars: int) -> dict:
+    """Apply an intro offset to any template.
+
+    Phrase templates are rebuilt so cue 2 lands right after the intro.
+    Other templates keep cue 1 on bar 1 and shift every later bar_N cue
+    by intro_bars, so their structure starts once the intro is over.
+    """
+    if not intro_bars:
+        return template
+    if "phrase_bars" in template:
+        return phrase_template(template["phrase_bars"], len(template["cues"]), intro_bars)
+    out = dict(template)
+    out["cues"] = {}
+    for slot, cue in template["cues"].items():
+        cue = dict(cue)
+        d = cue["detect"]
+        if int(slot) != 1 and d.startswith("bar_") and d[4:].isdigit():
+            cue["detect"] = f"bar_{int(d[4:]) + intro_bars}"
+        out["cues"][slot] = cue
+    out["intro_bars"] = intro_bars
+    return out
 
 
 def parse_phrase_name(name: str):

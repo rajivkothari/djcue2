@@ -2,6 +2,8 @@
 
 import json
 import mimetypes
+import threading
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -17,7 +19,10 @@ from autocue.anchor import pick_anchor, resolve_bar_position, ANCHOR_MODES
 from autocue.grid import resolve_grid, engine_beat_data_from_grid, GRID_MODES
 from autocue.codec import encode_beat_data
 from autocue.db import write_beat_data
-from autocue.templates import PHRASE_PRESETS, DEFAULT_PHRASE_CUES
+from autocue.templates import PHRASE_PRESETS, DEFAULT_PHRASE_CUES, with_intro
+from autocue.grid import custom_grid
+from autocue.undo import (record as undo_record, latest as undo_latest,
+                          discard as undo_discard, b64 as undo_b64, unb64 as undo_unb64)
 from autocue.constants import (
     ENGINE_COLORS, ENGINE_COLORS_HEX, DEFAULT_CUE_COLORS, get_sample_rate,
     format_time,
@@ -205,7 +210,7 @@ def api_analyze():
         return jsonify({"error": "Track not found"}), 404
 
     track = tracks[0]
-    template = load_template(template_name)
+    template = with_intro(load_template(template_name), int(data.get("intro_bars", 0) or 0))
     analysis_params = template.get("analysis", {})
     template_cues = template["cues"]
 
@@ -411,6 +416,7 @@ def api_finalize():
 # ---------------------------------------------------------------------------
 
 _vdj_db_path: str | None = None
+_rekordbox_xml: str | None = None
 _RGB_TO_NAME = {(r, g, b): name for name, (a, r, g, b) in ENGINE_COLORS.items()}
 
 
@@ -531,6 +537,8 @@ def api_track(track_id):
         "audio_path": str(audio_path) if audio_path else None,
         "serato_supported": bool(ext) and ext in (serato.MP3_LIKE | serato.MP4_LIKE | serato.FLAC_LIKE),
         "vdj_available": (_vdj_db_path or vdj.find_database()) is not None,
+        "rekordbox_path": str(_rb_path()),
+        "can_undo": undo_latest(_backups_dir(), track["id"]) is not None,
     })
 
 
@@ -605,18 +613,29 @@ def api_generate():
     if anchor_seconds is None:
         return jsonify({"error": "Set bar 1 first"}), 400
     try:
-        template = load_template(data.get("template", "edm"))
+        template = with_intro(load_template(data.get("template", "edm")),
+                              int(data.get("intro_bars", 0) or 0))
     except (FileNotFoundError, ValueError) as e:
         return jsonify({"error": str(e)}), 400
 
     grid_mode = data.get("grid", "auto")
-    if grid_mode not in GRID_MODES:
-        return jsonify({"error": f"Unknown grid mode '{grid_mode}'"}), 400
     sample_rate = get_sample_rate(track)
-    try:
-        grid = resolve_grid(track, grid_mode, _audio_path_or_none(track), sample_rate)
-    except Exception as e:
-        return jsonify({"error": f"AI grid failed: {e}"}), 400
+    audio_path = _audio_path_or_none(track)
+    if grid_mode == "custom":
+        try:
+            grid = _build_grid_from_spec(track, sample_rate, {
+                "source": "custom", "seconds_per_beat": data["seconds_per_beat"],
+                "bar1_seconds": anchor_seconds,
+                "duration_seconds": data.get("duration_seconds", 0)}, audio_path)
+        except Exception as e:
+            return jsonify({"error": f"Custom grid failed: {e}"}), 400
+    else:
+        if grid_mode not in GRID_MODES:
+            return jsonify({"error": f"Unknown grid mode '{grid_mode}'"}), 400
+        try:
+            grid = resolve_grid(track, grid_mode, audio_path, sample_rate)
+        except Exception as e:
+            return jsonify({"error": f"AI grid failed: {e}"}), 400
     if grid is None or not grid["beats"]:
         return jsonify({"error": (grid or {}).get("note")
                         or "Track has no beat grid in Engine DJ"}), 400
@@ -656,26 +675,50 @@ def favicon():
     return "", 204
 
 
-@app.route("/api/save", methods=["POST"])
-def api_save():
-    data = request.json
-    track = _get_track(data.get("track_id"))
-    if track is None:
-        return jsonify({"error": "Track not found"}), 404
-    cues = data.get("cues", [])
-    targets = data.get("targets", {})
-    clear_missing = bool(data.get("clear_missing", True))
+def _rb_path() -> Path:
+    from autocue.exporters import rekordbox
+    if _rekordbox_xml:
+        return Path(_rekordbox_xml)
+    return rekordbox.default_path(Path(_db_path).parent.parent)
+
+
+def _build_grid_from_spec(track, sample_rate, spec, audio_path):
+    """spec: "ai" | {"source": "custom", "seconds_per_beat", "bar1_seconds"}."""
+    if spec == "ai" or spec is None:
+        grid = resolve_grid(track, "ai", audio_path, sample_rate)
+        if grid is None or not grid["beats"]:
+            raise RuntimeError("AI could not build a grid for this track")
+        return grid
+    if isinstance(spec, dict) and spec.get("source") == "custom":
+        total = None
+        if track.get("beat_data_blob"):
+            total = decode_beat_data(track["beat_data_blob"])["total_samples"]
+        if total is None and audio_path is not None:
+            try:
+                import soundfile as sf
+                info = sf.info(str(audio_path))
+                total = info.frames * sample_rate / info.samplerate
+            except Exception:
+                total = None
+        if total is None:
+            total = float(spec.get("duration_seconds", 0)) * sample_rate
+        if not total:
+            raise RuntimeError("Track length unknown; cannot build a custom grid")
+        return custom_grid(float(spec["seconds_per_beat"]), float(spec["bar1_seconds"]),
+                           sample_rate, total, note="custom tempo")
+    raise RuntimeError("Unknown grid specification")
+
+
+def _save_track(track, cues, targets, clear_missing=True, grid_spec=None):
+    """Write `cues` to the chosen targets; journal the previous state."""
+    from autocue.exporters import serato, vdj, rekordbox
+    from autocue.pipeline import apply_cues_to_blob
+
     results = {}
-
-    for c in cues:
-        if not 1 <= int(c["slot"]) <= 8:
-            return jsonify({"error": f"Bad slot {c['slot']}"}), 400
-        if c.get("color_name", "yellow").lower() not in ENGINE_COLORS:
-            return jsonify({"error": f"Unknown color {c.get('color_name')}"}), 400
-
     sample_rate = get_sample_rate(track)
     audio_path = _audio_path_or_none(track)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    snapshot = {"track_id": track["id"], "title": track["title"]}
 
     # --- Engine DJ -----------------------------------------------------
     if targets.get("engine"):
@@ -684,44 +727,25 @@ def api_save():
         elif not track["quick_cues_blob"]:
             results["engine"] = {"ok": False, "message": "Track has no quickCues blob (analyze it in Engine DJ first)"}
         else:
-            cue_data = decode_quick_cues(track["quick_cues_blob"])
-            by_slot = {int(c["slot"]): c for c in cues}
-            for idx in range(len(cue_data["cues"])):
-                slot = idx + 1
-                if slot in by_slot:
-                    c = by_slot[slot]
-                    a, r, g, b = ENGINE_COLORS[c.get("color_name", "yellow").lower()]
-                    cue_data["cues"][idx] = {
-                        "index": idx, "label": c.get("label", ""),
-                        "position_samples": float(c["time_seconds"]) * sample_rate,
-                        "color_a": a, "color_r": r, "color_g": g, "color_b": b,
-                    }
-                elif clear_missing:
-                    cue_data["cues"][idx] = {
-                        "index": idx, "label": "",
-                        "position_samples": CUE_POSITION_EMPTY,
-                        "color_a": 0, "color_r": 0, "color_g": 0, "color_b": 0,
-                    }
+            cue_data = apply_cues_to_blob(decode_quick_cues(track["quick_cues_blob"]),
+                                          cues, sample_rate, clear_missing=clear_missing)
             backup = backup_library(_db_path)
             wdb = _conn(readonly=False)
             try:
                 write_quick_cues(wdb, track["id"], encode_quick_cues(cue_data))
             finally:
                 wdb.close()
+            snapshot["engine"] = {"quick_cues": undo_b64(track["quick_cues_blob"])}
             results["engine"] = {"ok": True, "message": f"Wrote {len(cues)} cues",
                                  "backup": str(backup)}
 
-    # --- AI beat grid into Engine DJ (opt-in) ----------------------------
+    # --- beat grid into Engine DJ (opt-in) -------------------------------
     if targets.get("engine_grid"):
         if is_engine_dj_running():
             results["engine_grid"] = {"ok": False, "message": "Engine DJ is running. Close it first."}
-        elif audio_path is None:
-            results["engine_grid"] = {"ok": False, "message": "Audio file not found"}
         else:
             try:
-                grid = resolve_grid(track, "ai", audio_path, sample_rate)
-                if grid is None or not grid["beats"]:
-                    raise RuntimeError("AI could not build a grid for this track")
+                grid = _build_grid_from_spec(track, sample_rate, grid_spec, audio_path)
                 bd = engine_beat_data_from_grid(grid, track["beat_data_blob"])
                 backup = (results.get("engine", {}).get("backup")
                           or str(backup_library(_db_path)))
@@ -730,6 +754,7 @@ def api_save():
                     write_beat_data(wdb, track["id"], encode_beat_data(bd))
                 finally:
                     wdb.close()
+                snapshot["engine_grid"] = {"beat_data": undo_b64(track["beat_data_blob"])}
                 results["engine_grid"] = {
                     "ok": True, "backup": backup,
                     "message": f"Replaced Engine DJ's beat grid: {grid['tempo_bpm']:.2f} BPM, "
@@ -743,7 +768,6 @@ def api_save():
             results["serato"] = {"ok": False, "message": "Audio file not found"}
         else:
             try:
-                from autocue.exporters import serato
                 scues = []
                 for c in cues:
                     a, r, g, b = ENGINE_COLORS[c.get("color_name", "yellow").lower()]
@@ -752,19 +776,18 @@ def api_save():
                         position_ms=int(round(float(c["time_seconds"]) * 1000)),
                         color=(r, g, b), name=c.get("label", "")))
                 previous = serato.write_cues(audio_path, scues)
-                msg = f"Wrote {len(scues)} cues to {audio_path.name}"
-                res = {"ok": True, "message": msg}
+                res = {"ok": True, "message": f"Wrote {len(scues)} cues to {audio_path.name}"}
                 if previous is not None:
                     bpath = _backups_dir() / f"serato_{track['id']}_{stamp}.bin"
                     bpath.write_bytes(previous)
                     res["backup"] = str(bpath)
+                snapshot["serato"] = {"path": str(audio_path), "tag": undo_b64(previous)}
                 results["serato"] = res
             except Exception as e:
                 results["serato"] = {"ok": False, "message": str(e)}
 
     # --- VirtualDJ database.xml ------------------------------------------
     if targets.get("vdj"):
-        from autocue.exporters import vdj
         db = _vdj_db_path or vdj.find_database()
         if db is None:
             results["vdj"] = {"ok": False, "message": "VirtualDJ database.xml not found"}
@@ -774,25 +797,315 @@ def api_save():
             results["vdj"] = {"ok": False, "message": "VirtualDJ is running. Close it first."}
         else:
             try:
+                previous = vdj.read_cues(db, str(audio_path))
                 vcues = []
                 for c in cues:
                     a, r, g, b = ENGINE_COLORS[c.get("color_name", "yellow").lower()]
                     vcues.append({"num": int(c["slot"]), "seconds": float(c["time_seconds"]),
                                   "name": c.get("label", ""), "color": (r, g, b)})
-                res = vdj.write_cues(db, str(audio_path), vcues)
+                res = vdj.write_cues(db, str(audio_path), vcues, replace_all=clear_missing)
+                snapshot["vdj"] = {"db": str(db), "path": str(audio_path), "cues": previous}
                 results["vdj"] = {"ok": True, "backup": res["backup"],
                                   "message": f"Wrote {res['written']} cues"
                                              + (" (new entry)" if res["created_song"] else "")}
             except Exception as e:
                 results["vdj"] = {"ok": False, "message": str(e)}
 
+    # --- rekordbox XML collection ----------------------------------------
+    if targets.get("rekordbox"):
+        if audio_path is None:
+            results["rekordbox"] = {"ok": False, "message": "Audio file not found"}
+        else:
+            try:
+                xml = _rb_path()
+                previous = rekordbox.read_cues(xml, str(audio_path))
+                rcues = []
+                for c in cues:
+                    a, r, g, b = ENGINE_COLORS[c.get("color_name", "yellow").lower()]
+                    rcues.append({"num": int(c["slot"]), "seconds": float(c["time_seconds"]),
+                                  "name": c.get("label", ""), "color": (r, g, b)})
+                grid_info, duration = None, None
+                try:
+                    g = (_build_grid_from_spec(track, sample_rate, grid_spec, audio_path)
+                         if grid_spec else resolve_grid(track, "engine", audio_path, sample_rate))
+                    if g and g.get("beats"):
+                        bar1 = g.get("first_downbeat")
+                        if bar1 is None:
+                            bar1 = min((c["time_seconds"] for c in cues if int(c["slot"]) == 1),
+                                       default=g["downbeats"][0] / sample_rate if g["downbeats"] else 0.0)
+                        else:
+                            bar1 = bar1 / sample_rate
+                        grid_info = {"first_beat_seconds": bar1, "bpm": g["tempo_bpm"]}
+                        if g.get("total_samples"):
+                            duration = g["total_samples"] / sample_rate
+                except Exception:
+                    grid_info = None
+                res = rekordbox.write_cues(
+                    xml, str(audio_path), rcues, title=track["title"], artist=track["artist"],
+                    bpm=track.get("bpm"), duration_seconds=duration, grid=grid_info)
+                snapshot["rekordbox"] = {"xml": str(xml), "path": str(audio_path),
+                                         "cues": previous, "existed": previous is not None}
+                results["rekordbox"] = {
+                    "ok": True, "backup": res["backup"],
+                    "message": f"Wrote {res['written']} cues to {xml.name}"
+                               + (" (new entry)" if res["created_track"] else "")
+                               + (" with beat grid" if grid_info else "")}
+            except Exception as e:
+                results["rekordbox"] = {"ok": False, "message": str(e)}
+
+    if any(k in snapshot for k in ("engine", "engine_grid", "serato", "vdj", "rekordbox")):
+        undo_record(_backups_dir(), snapshot)
+    return results
+
+
+@app.route("/api/save", methods=["POST"])
+def api_save():
+    data = request.json
+    track = _get_track(data.get("track_id"))
+    if track is None:
+        return jsonify({"error": "Track not found"}), 404
+    cues = data.get("cues", [])
+    for c in cues:
+        if not 1 <= int(c["slot"]) <= 8:
+            return jsonify({"error": f"Bad slot {c['slot']}"}), 400
+        if c.get("color_name", "yellow").lower() not in ENGINE_COLORS:
+            return jsonify({"error": f"Unknown color {c.get('color_name')}"}), 400
+    results = _save_track(track, cues, data.get("targets", {}),
+                          clear_missing=bool(data.get("clear_missing", True)),
+                          grid_spec=data.get("grid_spec"))
     return jsonify({"results": results})
 
 
+@app.route("/api/undo/<int:track_id>", methods=["POST"])
+def api_undo(track_id):
+    """Restore every target to the state recorded by the last save."""
+    from autocue.exporters import serato, vdj, rekordbox
+    track = _get_track(track_id)
+    if track is None:
+        return jsonify({"error": "Track not found"}), 404
+    found = undo_latest(_backups_dir(), track_id)
+    if found is None:
+        return jsonify({"error": "Nothing to undo for this track"}), 404
+    path, snap = found
+    results = {}
+
+    if "engine" in snap or "engine_grid" in snap:
+        if is_engine_dj_running():
+            results["engine"] = {"ok": False, "message": "Engine DJ is running. Close it first."}
+        else:
+            try:
+                backup_library(_db_path)
+                wdb = _conn(readonly=False)
+                try:
+                    if "engine" in snap:
+                        blob = undo_unb64(snap["engine"]["quick_cues"])
+                        if blob is not None:
+                            write_quick_cues(wdb, track_id, blob)
+                            results["engine"] = {"ok": True, "message": "Cues restored"}
+                    if "engine_grid" in snap:
+                        blob = undo_unb64(snap["engine_grid"]["beat_data"])
+                        write_beat_data(wdb, track_id, blob)
+                        results["engine_grid"] = {"ok": True, "message": "Beat grid restored"}
+                finally:
+                    wdb.close()
+            except Exception as e:
+                results["engine"] = {"ok": False, "message": str(e)}
+
+    if "serato" in snap:
+        try:
+            serato.restore_tag_bytes(snap["serato"]["path"], undo_unb64(snap["serato"]["tag"]))
+            results["serato"] = {"ok": True, "message": "File tag restored"}
+        except Exception as e:
+            results["serato"] = {"ok": False, "message": str(e)}
+
+    if "vdj" in snap:
+        try:
+            s = snap["vdj"]
+            if vdj.is_virtualdj_running():
+                raise RuntimeError("VirtualDJ is running. Close it first.")
+            prev = [dict(c, color=tuple(c["color"])) for c in (s["cues"] or [])]
+            vdj.write_cues(s["db"], s["path"], prev, replace_all=True)
+            results["vdj"] = {"ok": True, "message": f"Restored {len(prev)} cues"}
+        except Exception as e:
+            results["vdj"] = {"ok": False, "message": str(e)}
+
+    if "rekordbox" in snap:
+        try:
+            s = snap["rekordbox"]
+            if s.get("existed") and s.get("cues") is not None:
+                prev = [dict(c, color=tuple(c["color"])) for c in s["cues"]]
+                rekordbox.write_cues(s["xml"], s["path"], prev)
+                results["rekordbox"] = {"ok": True, "message": f"Restored {len(prev)} cues"}
+            else:
+                rekordbox.remove_track(s["xml"], s["path"])
+                results["rekordbox"] = {"ok": True, "message": "Entry removed"}
+        except Exception as e:
+            results["rekordbox"] = {"ok": False, "message": str(e)}
+
+    if all(r.get("ok") for r in results.values()):
+        undo_discard(path)
+    remaining = undo_latest(_backups_dir(), track_id)
+    return jsonify({"results": results, "restored_from": snap.get("time"),
+                    "can_undo": remaining is not None})
+
+
+# ---------------------------------------------------------------------------
+# Batch: plan a whole playlist/crate in the background, then apply
+# ---------------------------------------------------------------------------
+
+_jobs: dict = {}
+_jobs_lock = threading.Lock()
+
+
+def _job_public(job: dict) -> dict:
+    return {k: v for k, v in job.items() if k not in ("_tracks", "_plans", "_thread")}
+
+
+def _run_batch_job(job_id: str):
+    job = _jobs[job_id]
+    from autocue.pipeline import plan_track, needs_analysis
+    from autocue.templates import load_template, with_intro
+    try:
+        template = with_intro(load_template(job["template"]), job["intro_bars"])
+    except Exception as e:
+        job.update(done=True, error=str(e))
+        return
+    analyze = None
+    if needs_analysis(template):
+        try:
+            from autocue.analysis import analyze_structure as analyze
+        except ImportError as e:
+            job.update(done=True, error=str(e))
+            return
+    job["template_name"] = template.get("name")
+
+    for i, track in enumerate(job["_tracks"]):
+        if job.get("cancel"):
+            break
+        sample_rate = get_sample_rate(track)
+        audio_path = _audio_path_or_none(track)
+        try:
+            plan = plan_track(track, template, sample_rate=sample_rate, audio_path=audio_path,
+                              grid_mode=job["grid"], anchor_mode=job["anchor"],
+                              beat_offset=job["beat_offset"], overwrite=job["overwrite"],
+                              max_duration=job["max_duration"], analyze=analyze,
+                              ai_detector=_ai_detector(audio_path))
+        except Exception as e:
+            plan = {"status": "error", "reason": str(e), "proposed": [], "flags": [],
+                    "needs_review": False, "grid": None, "anchor": None,
+                    "duration": None, "existing": []}
+        job["_plans"][track["id"]] = plan
+        row = {
+            "track_id": track["id"], "title": track["title"], "artist": track["artist"],
+            "status": plan["status"], "reason": plan["reason"],
+            "needs_review": plan["needs_review"], "flags": plan["flags"],
+            "grid": (plan["grid"] or {}).get("source"),
+            "tempo_bpm": (plan["grid"] or {}).get("tempo_bpm"),
+            "anchor": (plan["anchor"] or {}).get("source"),
+            "cues": [{"slot": c["slot"], "label": c["label"], "time_display": format_time(c["time_seconds"])}
+                     for c in plan["proposed"]],
+            "applied": None,
+        }
+        job["rows"].append(row)
+        job["progress"] = i + 1
+    job["done"] = True
+
+
+@app.route("/api/batch", methods=["POST"])
+def api_batch_start():
+    data = request.json or {}
+    source_type, name = data.get("type"), data.get("name")
+    if not source_type or not name:
+        return jsonify({"error": "type and name required"}), 400
+    conn = _conn()
+    try:
+        tracks = (get_playlist_tracks(conn, name) if source_type == "playlist"
+                  else get_crate_tracks(conn, name))
+    finally:
+        conn.close()
+    if not tracks:
+        return jsonify({"error": f"No tracks in {source_type} '{name}'"}), 404
+    grid = data.get("grid", "auto")
+    anchor = data.get("anchor", "auto")
+    if grid not in GRID_MODES or anchor not in ANCHOR_MODES:
+        return jsonify({"error": "Bad grid or anchor mode"}), 400
+
+    job_id = uuid.uuid4().hex[:10]
+    job = {
+        "id": job_id, "source": f"{source_type} '{name}'", "total": len(tracks),
+        "progress": 0, "done": False, "error": None, "rows": [],
+        "template": data.get("template", "phrase-16"),
+        "intro_bars": int(data.get("intro_bars", 0) or 0),
+        "grid": grid, "anchor": anchor,
+        "beat_offset": int(data.get("beat_offset", 0) or 0),
+        "overwrite": bool(data.get("overwrite", False)),
+        "max_duration": float(data.get("max_duration", 900) or 0) or None,
+        "_tracks": tracks, "_plans": {},
+    }
+    with _jobs_lock:
+        _jobs[job_id] = job
+    t = threading.Thread(target=_run_batch_job, args=(job_id,), daemon=True)
+    job["_thread"] = t
+    t.start()
+    return jsonify(_job_public(job))
+
+
+@app.route("/api/batch/<job_id>")
+def api_batch_status(job_id):
+    job = _jobs.get(job_id)
+    if job is None:
+        return jsonify({"error": "Unknown job"}), 404
+    return jsonify(_job_public(job))
+
+
+@app.route("/api/batch/<job_id>/cancel", methods=["POST"])
+def api_batch_cancel(job_id):
+    job = _jobs.get(job_id)
+    if job is None:
+        return jsonify({"error": "Unknown job"}), 404
+    job["cancel"] = True
+    return jsonify({"ok": True})
+
+
+@app.route("/api/batch/<job_id>/apply", methods=["POST"])
+def api_batch_apply(job_id):
+    """Write the planned cues for the selected tracks to the chosen targets."""
+    job = _jobs.get(job_id)
+    if job is None:
+        return jsonify({"error": "Unknown job"}), 404
+    if not job["done"]:
+        return jsonify({"error": "Batch is still running"}), 409
+    data = request.json or {}
+    targets = data.get("targets", {"engine": True})
+    ids = data.get("track_ids")
+    write_grid = bool(data.get("write_grid", False))
+    applied = {}
+    for row in job["rows"]:
+        tid = row["track_id"]
+        if ids is not None and tid not in ids:
+            continue
+        plan = job["_plans"].get(tid)
+        if not plan or plan["status"] != "ok":
+            continue
+        track = _get_track(tid)
+        if track is None:
+            continue
+        tgts = dict(targets)
+        if write_grid and plan["grid"] and plan["grid"]["source"] == "ai":
+            tgts["engine_grid"] = True
+        results = _save_track(track, plan["proposed"], tgts,
+                              clear_missing=bool(data.get("clear_missing", False)),
+                              grid_spec="ai")
+        row["applied"] = results
+        applied[tid] = results
+    return jsonify({"applied": applied, "count": len(applied)})
+
+
 def run_server(db_path: str, host: str = "127.0.0.1", port: int = 5555,
-               vdj_db: str | None = None):
-    global _vdj_db_path
+               vdj_db: str | None = None, rekordbox_xml: str | None = None):
+    global _vdj_db_path, _rekordbox_xml
     _vdj_db_path = vdj_db
+    _rekordbox_xml = rekordbox_xml
     set_db_path(db_path)
     conn = _conn()
     try:
@@ -802,4 +1115,5 @@ def run_server(db_path: str, host: str = "127.0.0.1", port: int = 5555,
         conn.close()
     print(f"Review workflow: http://{host}:{port}")
     print(f"Cue editor:      http://{host}:{port}/editor")
-    app.run(host=host, port=port, debug=False)
+    print(f"rekordbox XML:   {_rb_path()}")
+    app.run(host=host, port=port, debug=False, threaded=True)

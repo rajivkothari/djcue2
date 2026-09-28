@@ -106,8 +106,31 @@ def resolve_grid(track: dict, mode: str, audio_path, sample_rate: float,
     return ai
 
 
+def custom_grid(seconds_per_beat: float, bar1_seconds: float, sample_rate: float,
+                total_samples: float, note: str = "") -> dict:
+    """A constant-tempo grid from a tempo (tap / x2 / /2) and a bar-1 time."""
+    import math
+    spb = seconds_per_beat * sample_rate
+    first_db = bar1_seconds * sample_rate
+    kmin = math.ceil(-first_db / spb)
+    kmax = math.floor((total_samples - first_db) / spb)
+    ks = range(kmin, kmax + 1)
+    return {
+        "source": "custom",
+        "beats": [first_db + k * spb for k in ks],
+        "downbeats": [first_db + k * spb for k in ks if k % BEATS_PER_BAR == 0],
+        "samples_per_beat": spb,
+        "sample_rate": sample_rate,
+        "total_samples": float(total_samples),
+        "tempo_bpm": 60.0 / seconds_per_beat,
+        "first_downbeat": first_db,
+        "first_beat_index": kmin,
+        "note": note,
+    }
+
+
 def engine_beat_data_from_grid(grid: dict, existing_blob=None) -> dict:
-    """Build an Engine beatData dict from an AI grid.
+    """Build an Engine beatData dict from an AI or custom grid.
 
     Two markers, as Engine itself writes for constant-tempo tracks. Beat
     number 0 sits on bar 1, so downbeats land on multiples of 4 exactly
@@ -115,8 +138,8 @@ def engine_beat_data_from_grid(grid: dict, existing_blob=None) -> dict:
     grid beat at/after sample 0 (a negative beat number when bar 1 isn't
     the very first beat), so the grid covers the whole track.
     """
-    if grid.get("source") != "ai":
-        raise ValueError("Only an AI grid can be written back")
+    if grid.get("source") not in ("ai", "custom"):
+        raise ValueError("Only an AI or custom grid can be written back")
     spb = grid["samples_per_beat"]
     first_db = grid["first_downbeat"]
     total = grid["total_samples"]
