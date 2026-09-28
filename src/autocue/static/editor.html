@@ -110,7 +110,8 @@
       <div class="transport">
         <button class="btn sm" id="play-btn" onclick="togglePlay()">&#9654; Play</button>
         <span id="clock">0:00.000</span>
-        <span>Zoom</span><input type="range" id="zoom" min="10" max="400" value="40" oninput="ws && ws.zoom(+this.value)">
+        <span>Zoom</span><input type="range" id="zoom" min="1" max="400" value="1" oninput="ws && ws.zoom(+this.value)" title="Whole track fits the window at the left; drag right to zoom in">
+        <button class="btn sm" onclick="fitWaveform()" title="Show the whole track">Fit</button>
         <span class="hint">Drag any marker to move it. <kbd>Space</kbd> play/pause · <kbd>B</kbd> set bar 1 at playhead</span>
       </div>
 
@@ -240,7 +241,7 @@ async function selectTrack(id) {
   document.querySelectorAll('.track-item').forEach(el => el.classList.toggle('active', +el.dataset.id === id));
   $('empty').style.display = 'none'; $('editor').style.display = 'block';
   $('t-title').textContent = track.title;
-  $('t-meta').textContent = `${track.artist} · ${track.bpm ? track.bpm.toFixed(1) + ' BPM' : 'no BPM'} · ${track.beats.length} grid beats · ${track.audio_path || 'audio file not found'}`;
+  $('t-meta').textContent = `${track.artist} · ${track.bpm ? track.bpm.toFixed(1) + ' BPM (Engine)' : 'no BPM'} · ${track.audio_path || 'audio file not found'}`;
   $('save-results').innerHTML = ''; $('gen-status').textContent = '';
   $('btn-main').disabled = track.main_cue_seconds == null;
   $('btn-grid').disabled = track.grid_first_downbeat_seconds == null;
@@ -314,11 +315,11 @@ function loadWaveform() {
   if (ws) { ws.destroy(); ws = null; }
   ws = WaveSurfer.create({
     container: '#waveform', waveColor: '#4a4a6a', progressColor: '#e94560', cursorColor: '#ffffff88',
-    height: 120, barWidth: 2, barGap: 1, barRadius: 2, normalize: true, minPxPerSec: +$('zoom').value,
+    height: 120, barWidth: 2, barGap: 1, barRadius: 2, normalize: true, minPxPerSec: 1, fillParent: true,
     url: `/api/audio/${track.id}`,
   });
   regions = ws.registerPlugin(WaveSurfer.Regions.create());
-  ws.on('ready', () => { renderMarkers(); });
+  ws.on('ready', () => { fitWaveform(); renderMarkers(); });
   ws.on('timeupdate', t => { $('clock').textContent = fmt(t); });
   ws.on('play', () => $('play-btn').innerHTML = '&#10074;&#10074; Pause');
   ws.on('pause', () => $('play-btn').innerHTML = '&#9654; Play');
@@ -335,7 +336,10 @@ function loadWaveform() {
 }
 
 function renderMarkers() {
-  if (!regions) return;
+  // Adding regions before the audio is decoded leaves ghost markers at 0:00
+  // (the plugin re-attaches them on ready without repositioning), so wait;
+  // the 'ready' handler calls this again.
+  if (!regions || !ws || !ws.getDuration()) return;
   regions.clearRegions();
   if (anchor != null) {
     // Cue 1 normally sits exactly on bar 1, so pin this flag to the bottom
@@ -449,6 +453,14 @@ function editCue(slot, field, value) {
 function removeCue(slot) { cues = cues.filter(c => c.slot !== slot); renderTable(); renderMarkers(); }
 
 // ---------------------------------------------------------------- transport
+function fitWaveform() {
+  // Whole track across the panel, so every generated cue is visible at once.
+  if (!ws || !ws.getDuration()) return;
+  const width = $('waveform').clientWidth || 1000;
+  const pxPerSec = Math.max(1, Math.floor(width / ws.getDuration()));
+  ws.zoom(pxPerSec);
+  $('zoom').value = pxPerSec;
+}
 function togglePlay() { if (ws) ws.playPause(); }
 function previewAt(t) {
   if (!ws || t == null) return;
